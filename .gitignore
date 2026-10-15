@@ -1,0 +1,9 @@
+# build artifacts
+/konica-native
+/tests/libcups_dump
+/tools/mkraster
+
+# editor / OS noise
+*.o
+*.swp
+.DS_Store
