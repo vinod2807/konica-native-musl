@@ -16,12 +16,12 @@
  *   cell corner offsets {0,1089,33,1122,1,1090,34,1123}   (strides 33^2,33,1)
  *   and  out = ( sum(weight * corner) * 0x80808081 ) >> 39   (i.e. /255)
  *
- * The 33^3 table is generated at runtime by the vendor's CMM from the installed
- * grey profile (Profiles/sGrayInv.icm); it is not a file the vendor ships.  To
- * stay dependency-free and embed no vendor data, this module loads a dump of the
- * table (35937 bytes) captured from the running vendor filter — see
- * tools/dump-lut.gdb and docs/REVERSE-ENGINEERING.md.  When no dump is supplied
- * the caller falls back to the flat-tone approximation.
+ * The 33^3 table itself is not a file the vendor ships: its CMM generates it
+ * at start-up from the installed ICC profiles.  That generator has been
+ * recovered in full and is reproduced by lutgen.c, so acmm_generate() builds
+ * the table from the same profiles the vendor reads and needs no external
+ * data.  acmm_load() remains available for a captured dump (KONICA_LUT) as a
+ * cross-check.  See docs/LUT-GENERATOR.md and docs/REVERSE-ENGINEERING.md.
  */
 #include <stdint.h>
 
@@ -29,6 +29,11 @@ typedef struct acmm acmm_t;
 
 /* Load a 33^3 (35937-byte) LUT dump; NULL if unavailable. */
 acmm_t *acmm_load(const char *path);
+
+/* Regenerate the 33^3 table from the installed ICC profiles (see lutgen.h);
+ * NULL if the profiles are unavailable or unsupported. */
+acmm_t *acmm_generate(const char *srgb_icm, const char *gray_icm);
+
 void    acmm_free(acmm_t *a);
 
 /* Phi(s0,s1,s2) -> 0..255. */

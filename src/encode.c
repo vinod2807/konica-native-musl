@@ -80,12 +80,25 @@ static const char *hft_path(void)
            "COPA.DEFAULT.600x600.hft";
 }
 
-/* Optional dump of the CMM 33^3 table (see acmm.h / docs/REVERSE-ENGINEERING.md).
- * Absent -> the flat-tone approximation is used. */
-static const char *acmm_path(void)
+/* The vendor CMM does not read its 33^3 table from disk: it regenerates it
+ * from the installed ICC profiles.  We do the same (see lutgen.h), keeping a
+ * captured dump (KONICA_LUT) as an optional override/cross-check. */
+#define PROF_DIR "/usr/local/lib/konica/KonicaMinolta/245igdi/Profiles/"
+
+static const char *env_or(const char *env, const char *def)
 {
-    const char *p = getenv("KONICA_LUT");
-    return (p && *p) ? p : NULL;
+    const char *p = getenv(env);
+    return (p && *p) ? p : def;
+}
+
+static const char *srgb_path(void) { return env_or("KONICA_SRGB", PROF_DIR "sRGB.icm"); }
+static const char *gray_path(void) { return env_or("KONICA_GRAY", PROF_DIR "sGrayInv.icm"); }
+
+static acmm_t *acmm_open(void)
+{
+    const char *dump = env_or("KONICA_LUT", NULL);
+    if (dump) return acmm_load(dump);
+    return acmm_generate(srgb_path(), gray_path());
 }
 
 int enc_job_begin(sink_t *s, const job_t *j)
@@ -159,7 +172,7 @@ int enc_page(sink_t *s, const job_t *j, const ras_hdr_t *h, ras_t *r)
                 hft_path());
         return -1;
     }
-    acmm_t *acmm = acmm_path() ? acmm_load(acmm_path()) : NULL;
+    acmm_t *acmm = acmm_open();
 
     /* Build the 1-bit page image. Rows beyond the raster are left white. */
     size_t stride = (xd + 7) / 8;

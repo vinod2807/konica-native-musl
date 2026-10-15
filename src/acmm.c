@@ -1,4 +1,5 @@
 #include "acmm.h"
+#include "lutgen.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -23,6 +24,14 @@ acmm_t *acmm_load(const char *path)
 }
 
 void acmm_free(acmm_t *a) { free(a); }
+
+acmm_t *acmm_generate(const char *srgb_icm, const char *gray_icm)
+{
+    acmm_t *a = malloc(sizeof *a);
+    if (!a) return NULL;
+    if (lutgen_build(srgb_icm, gray_icm, a->lut) != 0) { free(a); return NULL; }
+    return a;
+}
 
 int acmm_phi(const acmm_t *a, int s0, int s1, int s2)
 {

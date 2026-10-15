@@ -2,6 +2,7 @@
 /konica-native
 /tests/libcups_dump
 /tools/mkraster
+/tools/lutgen-dump
 
 # editor / OS noise
 *.o
