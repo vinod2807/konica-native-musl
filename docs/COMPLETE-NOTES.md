@@ -1,0 +1,983 @@
+# Konica Minolta bizhub 206 — complete project notes
+
+*A single, self-contained account of how the vendor CUPS filter `245igdirf` produces its
+device stream, how that stream was reverse-engineered, and how `konica-native` reproduces it
+byte for byte.*
+
+---
+
+## How to read this document
+
+This is the **master record**. It consolidates:
+
+| Document | Role |
+|---|---|
+| `docs/COMPLETE-NOTES.md` | **this file** — the whole story, start to finish |
+| `docs/DEVICE-STREAM.md` | the condensed *format* spec (the "what") |
+| `docs/REVERSE-ENGINEERING.md` | the long-form *derivation* + evidence trail |
+| `docs/ALPINE.md`, `docs/ALPINE-PORT-STATUS.md` | musl/Alpine port status |
+| `README.md` | project landing page |
+| `README-RE.md` | historical README (superseded) |
+
+Where this file and the others overlap, **this file is authoritative** for the current
+state. Anything describing the ACMM stage as "open" or the test result as "7/60" is
+historical and is marked as such in those documents.
+
+---
+
+## Table of contents
+
+0. [Executive summary](#0-executive-summary)
+1. [Quick start](#1-quick-start)
+2. [The problem](#2-the-problem)
+3. [Ground rules and constraints](#3-ground-rules-and-constraints)
+4. [The environment: vendor artifacts](#4-the-environment-vendor-artifacts)
+5. [The capture corpus](#5-the-capture-corpus)
+6. [Pipeline overview](#6-pipeline-overview)
+7. [Stage A — input: the CUPS raster reader](#7-stage-a--input-the-cups-raster-reader)
+8. [Stage B — output: the PJL envelope](#8-stage-b--output-the-pjl-envelope)
+9. [Stage C — page geometry](#9-stage-c--page-geometry)
+10. [Stage D — the ACMM colour-world stage (Φ)](#10-stage-d--the-acmm-colour-world-stage-φ)
+11. [Stage E — the halftone screen](#11-stage-e--the-halftone-screen)
+12. [Stage F — the JBIG1 encoder](#12-stage-f--the-jbig1-encoder)
+13. [Bug archaeology](#13-bug-archaeology)
+14. [Verification](#14-verification)
+15. [The one open item: LUT provenance](#15-the-one-open-item-lut-provenance)
+16. [Reproduction recipes](#16-reproduction-recipes)
+17. [Code map](#17-code-map)
+18. [Glossary and address index](#18-glossary-and-address-index)
+19. [Appendices](#19-appendices)
+
+---
+
+## 0. Executive summary
+
+The Konica Minolta bizhub 206 is driven on Linux through a CUPS filter (`245igdirf`) that
+reads a **CUPS raster** page on stdin and writes a **PJL envelope containing one JBIG1
+bitmap per page** on stdout. `konica-native` is a dependency-free C11 reimplementation of
+that filter; it produces **byte-identical** output.
+
+| Layer | Status | Where |
+|---|---|---|
+| CUPS raster reader (v1 / v2-RLE / v3) | solved, verified vs libcups 27/27 | `src/raster.c` |
+| PJL envelope (job + page headers, chunking, duplex) | solved, byte-exact | `src/encode.c` |
+| Page geometry (per-paper `Xd`/`Yd`, paper codes) | solved, byte-exact | `src/encode.c` |
+| ACMM colour-world stage `Φ` (33³ LUT, 3-tap) | solved, `Φ` byte-exact | `src/acmm.c` |
+| Tone transform (`OCM_TonerSave`) | solved, proven empirically | `src/encode.c`, `src/main.c` |
+| Halftone screen + per-pixel rule | solved, byte-exact | `src/halftone.c` |
+| JBIG1 encoder (BIH, QM coder, stripes) | solved, matches jbigkit-2.2 | `src/jbig.c` |
+| **Whole pipeline** | **60/60 corpus cases byte-identical** | — |
+
+*Verified on glibc (host) **and** Alpine/musl (gcc 13.2.1, musl 1.2.x).*
+
+The one thing that is **not self-contained**: the vendor *computes* its 33³ colour-world
+table at runtime from the installed gray profile, and `konica-native` *loads a dump* of that
+table instead (`KONICA_LUT`). The bytes it emits are identical either way — this is a
+packaging question, not a correctness one. See [§15](#15-the-one-open-item-lut-provenance).
+
+---
+
+## 1. Quick start
+
+```sh
+make                                  # pure libc, gcc or clang, glibc or musl
+
+# extract the two vendor runtime tables (see §16) then:
+KONICA_HFT=/usr/local/lib/konica/KonicaMinolta/245igdi/Halftones/COPA.DEFAULT.600x600.hft \
+KONICA_LUT=/tmp/lut33.bin \
+tests/difftest.sh /path/to/konica-corpus-full
+# → PASS: 60 (of which masked: 0)   FAIL: 0
+
+make check-reader                     # → 27/27 (needs libcups headers)
+```
+
+As a CUPS filter:
+
+```
+konica-native  <job-id> <user> <title> <copies> "<options>"  [raster-file]
+```
+
+Output goes to **stdout**. Always redirect it to a file or hand it to the backend — the
+filter itself never opens the printer.
+
+Runtime data (both loaded at runtime, never compiled in):
+
+| Variable | What | Default when unset |
+|---|---|---|
+| `KONICA_HFT` | halftone screen `.hft` | the vendor install path |
+| `KONICA_LUT` | 33³ colour-world table (35937 bytes) | *none* → flat-tone fallback |
+
+---
+
+## 2. The problem
+
+The printer's Linux driver is a CUPS filter. Everything upstream of it (job options, PPD,
+raster generation) is normal CUPS. Everything **downstream** — the bytes that actually leave
+for the USB backend — is a proprietary, undocumented format produced by a closed binary:
+
+* `/usr/local/lib/konica/KonicaMinolta/245igdi/Filters/245igdirf` (the filter)
+* `/usr/local/lib/konica/KonicaMinolta/245igdi/Filters/mtorf.ocm` (an OCM plugin it dlopens)
+
+The goal was to reimplement that downstream side in clean, portable C, so the printer can be
+driven from a musl/Alpine system with no vendor binaries.
+
+**Ladder.** The project used rungs: **L0** = capture a ground-truth corpus from the real
+vendor filter; **L1** = reproduce that corpus byte-for-byte; **L2..L4** = hardening,
+packaging, upstreaming. This document covers L0 → L1.
+
+---
+
+## 3. Ground rules and constraints
+
+These came from the task and shaped every decision:
+
+1. **Never print.** Every vendor invocation redirects stdout to a file. No paper is consumed
+   during the entire investigation.
+2. **Do not guess bytes.** Every field in `src/encode.c` is derived from a capture or from
+   disassembly, and is stated with its evidence.
+3. **Dependency-free, pure libc, C11.** Must build on glibc *and* musl.
+4. **Do not redistribute vendor data.** The halftone screen and the colour-world table are
+   vendor runtime data; they are loaded at runtime, never embedded.
+5. **Do not vendor third-party encoders.** The JBIG1 encoder is written from the ITU-T T.82
+   tables in `src/jbig.c`; no GPL jbigkit source is copied in. (jbigkit-2.2 was used
+   *read-only* in `/tmp` as an independent oracle for verification — see [§14](#14-verification).)
+6. **Keep changes small and reviewable**, and document them.
+
+---
+
+## 4. The environment: vendor artifacts
+
+All captures were made on the host where the printer is installed.
+
+```
+Filter        /usr/local/lib/konica/KonicaMinolta/245igdi/Filters/245igdirf
+              530848 bytes  sha256 0548f3f3e20fae1e604e3bbe5464aedf5fbd8ff283f8173359f56153ce98a4d3
+OCM plugin    /usr/local/lib/konica/KonicaMinolta/245igdi/Filters/mtorf.ocm
+              798904 bytes  sha256 9c22aa9779eaeedb79b724bcfb67e484cae94b0b01a251337528077234eb3902
+Screen 600    .../Halftones/COPA.DEFAULT.600x600.hft
+              74860 bytes   sha256 24486c453fb90e0e2a2b6c34080dc6490f07b6590fafe7b3a51b5ece6c6732fa
+Screen 1200   .../Halftones/COPA.DEFAULT.1200x600.hft
+              149612 bytes  sha256 f631b41ef6b39663a591f1dc444ae2021b82054290003ac8b95ff9d6879a6408
+Profile       .../Profiles/sGrayInv.icm
+              668 bytes     sha256 01fd6208f2f04e61de6849ca27885b3758bca8bf278d7335338d804443a2ca0e
+PPD           /var/lib/legacy-printer-app/ppd/KonicaMinolta-206-fullbleed.ppd
+              153225 bytes  sha256 ee8ec30066fdc788debd4b102247daa0e52e3891dd98e839aa5e8d76a80c24b7
+Corpus        /root/konica-corpus-full/
+```
+
+Both binaries are **not stripped** (`mtorf.ocm` even ships `debug_info`), so symbols lead
+straight to the relevant code — this is what made the colour-world stage tractable.
+
+The filter only runs with a specific environment; with none of it set it writes nothing and
+exits 5 (no message at all):
+
+```sh
+export PPD=/var/lib/legacy-printer-app/ppd/KonicaMinolta-206-fullbleed.ppd
+export CONTENT_TYPE=application/vnd.cups-raster
+export FINAL_CONTENT_TYPE=application/vnd.cups-raster
+export CUPS_SERVERROOT=/etc/cups
+export CUPS_DATADIR=/usr/share/cups
+export LD_LIBRARY_PATH=/usr/local/lib/konica/lib
+/usr/local/lib/konica/KonicaMinolta/245igdi/Filters/245igdirf 1 u t 1 \
+    "PageSize=A4 media=A4 Duplex=None sides=one-sided Duplexer=true MediaType=Plain back-side-orientation=Rotated" \
+    < page.ras > page.prn
+```
+
+---
+
+## 5. The capture corpus
+
+`/root/konica-corpus-full/` holds 60 captured jobs:
+
+```
+manifest.tsv       61 lines (header + 60 cases)
+corpus/<id>.ras    the synthetic input raster
+corpus/<id>.prn    the vendor filter's captured stdout  ← ground truth
+corpus/<id>.mask   only for non-deterministic cases (none here)
+```
+
+`manifest.tsv` columns: `id, options, patterns, pages, ras_bytes, prn_bytes, exit,
+deterministic, ras_sha256, prn_sha256`.
+
+### 5.1 Case families
+
+| IDs | Family | What it pins down |
+|---|---|---|
+| 001–008 | `simplex-*` | blank, solid, gradients, row/column IDs, frame |
+| 009–016 | `probe-*` | single dots and an 8×8 box at chosen coordinates |
+| 017–028 | `tex-*` | horizontal/vertical lines, checkerboards, noise |
+| 029–033 | `duplex-*`, `simplex-3pg` | multi-page framing, long/short-edge binding |
+| 034–035 | `tonersave-*` | `OCM_TonerSave=TRUE` vs `=FALSE` |
+| 036 | `res-600x600dpi` | explicit resolution, 2 pages |
+| 037–060 | `size-*` | every PPD page size, all with a `frame` pattern |
+
+Inputs are **CUPS raster v2 (RLE)**, 8-bit grayscale (`CUPS_CSPACE_W`), 600×600 dpi (036
+additionally pins the explicit `Resolution` option). An A4 page is 4958×7017 pixels.
+
+### 5.2 Facts the corpus proves outright
+
+* **All 60 cases are deterministic** — two vendor runs are byte-identical, so there are no
+  timestamps or counters to mask. `0 masked` in the final result is therefore meaningful.
+* **`OCM_TonerSave` absent ≡ `TRUE`.** Case 005 (option absent) and case 034
+  (`OCM_TonerSave=TRUE`) produce byte-identical output; 035 (`=FALSE`) differs.
+
+---
+
+## 6. Pipeline overview
+
+```
+   CUPS raster (stdin)
+        │
+        │  src/raster.c      read pages, RLE-decode rows, 8-bit gray
+        ▼
+   8-bit gray page, row by row
+        │
+        │  src/acmm.c        Φ: 3-tap tetrahedral interpolation of a 33³ LUT
+        │                    (contiguous stride, right-edge wrap, per-band)
+        │  src/encode.c      −10 if OCM_TonerSave (default on)
+        ▼
+   8-bit "tone" rows
+        │
+        │  src/halftone.c    dot = (tone >= screen[page_row%96][x%96])
+        ▼
+   1-bit page image
+        │
+        │  src/jbig.c        JBIG1 BIE (BIH + QM-coded stripes + padding)
+        ▼
+   JBIG1 BIE  ──┐
+                │  src/encode.c   split into ≤32768-byte chunks, wrap in PJL
+                ▼
+   PJL envelope (stdout)
+```
+
+Each stage is described below, with the evidence that pins it.
+
+---
+
+## 7. Stage A — input: the CUPS raster reader
+
+`src/raster.c` is a pure-libc CUPS raster reader. It is **not** part of the reverse
+engineering — it reimplements the public CUPS raster format — but it is verified against
+libcups 2.4 (27/27 synthetic cases: 9 colour/depth combinations × {v3, v2-RLE, v1}).
+
+```
+"RaSt"  v1   420-byte header, uncompressed
+"RaS2"  v2  1796-byte header, RLE-compressed pixels
+"RaS3"  v3  1796-byte header, uncompressed pixels
+```
+
+Header fields used: `width` (+372), `height` (+376), `bits_per_pixel` (+388),
+`bytes_per_line` (+392), `color_space` (+400), `page_size_name` (+1732),
+`hw_res` (dpi), `duplex`, `tumble`.
+
+Two details that matter and are easy to get wrong:
+
+* **Page framing.** The 4-byte sync word appears **once**, at the start of the stream.
+  Pages 2..n follow directly as `header + pixels`, with no sync word. Measured byte counts:
+  two 64×32 8-bit v3 pages = `4 + 2*(1796 + 2048)` = 7692 bytes. Reading a per-page sync
+  would corrupt every multi-page job while single-page tests still passed. This is why
+  `src/raster.h` carries a loud "do not fix this" comment.
+* **v2 RLE.** Per line: one repeat byte, then runs — `128` = clear to end of line;
+  `b & 128` = literal run of `257-b` pixels; otherwise `b+1` copies of the next pixel.
+  "Clear to end of line" is filled with `0xFF` for non-K colour spaces, `0x00` for K-like
+  ones (see `white_is_ff()`). Getting this wrong silently misaligns whole pages.
+
+`konica-native --dump <file>` prints per-page headers plus an FNV-1a hash of every pixel —
+this is the reader cross-check.
+
+---
+
+## 8. Stage B — output: the PJL envelope
+
+The job is `\r\n`-terminated PJL lines wrapped in a UEL (`\x1b%-12345X`).
+
+```text
+\x1b%-12345X@PJL\r\n                       ┐
+@PJL SET COMPRESS=JBIG\r\n                 │ once per JOB
+@PJL SET COVER=OFF\r\n                     │
+@PJL SET HOLD=OFF\r\n                      │
+@PJL SET SECTION=OFF\r\n                   │
+@PJL SET COPIES=1\r\n                      ┘
+   ┌─ per page ─────────────────────────────────────────────┐
+   │ @PJL SET PAGESTATUS=START\r\n                          │
+   │ @PJL SET DUPLEX=OFF\r\n   (or ON + BINDING=...\r\n)    │
+   │ @PJL SET PAPER=<code>\r\n                              │
+   │ @PJL SET PAPERWIDTH=<w>\r\n                            │
+   │ @PJL SET PAPERLENGTH=<h>\r\n                           │
+   │ @PJL SET MEDIASOURCE=AUTO\r\n                          │
+   │ @PJL SET MEDIATYPE=PLAIN\r\n                           │
+   │ @PJL SET RESOLUTION=<dpi>\r\n                          │
+   │ @PJL SET IMAGELEN=<n>\r\n<n raw bytes>   (per chunk)   │
+   │ @PJL SET PAGESTATUS=END\r\n                            │
+   └────────────────────────────────────────────────────────┘
+@PJL EOJ\r\n
+\x1b%-12345X\r\n
+```
+
+Option mapping:
+
+| CUPS option | PJL |
+|---|---|
+| `Duplex=None` | `DUPLEX=OFF`, no `BINDING` line |
+| `Duplex=DuplexNoTumble` (long edge) | `DUPLEX=ON` + `BINDING=SHORTEDGE` |
+| `Duplex=DuplexTumble` (short edge) | `DUPLEX=ON` + `BINDING=LONGEDGE` |
+| `PageSize` | `PAPER=<code>` + `PAPERWIDTH` + `PAPERLENGTH` |
+| `Resolution` | `RESOLUTION=<dpi>` |
+| `MediaType=Plain` | `MEDIATYPE=PLAIN` + fixed `MEDIASOURCE=AUTO` |
+
+`OCM_TonerSave` never appears in the envelope — it only changes page pixels.
+
+**Chunking.** The page's JBIG BIE is split into chunks of **at most 32768 bytes**, each
+prefixed by its own `@PJL SET IMAGELEN=<n>\r\n`.
+
+---
+
+## 9. Stage C — page geometry
+
+Two independent per-paper facts had to be reproduced: the PJL paper code / dimensions, and
+the **image dimensions `Xd`/`Yd`** that go into the JBIG header.
+
+`Xd`/`Yd` are **not** a clean function of the raster size. The off-by-one varies per paper
+and is not even consistent (16K uses the raster width, A4 uses width−1). It was therefore
+transcribed from the corpus into `papers[]` in `src/encode.c`:
+
+| `page_size_name` | PJL `PAPER` | PAPERWIDTH | PAPERLENGTH | Xd | Yd |
+|---|---|---|---|---|---|
+| `16K` | `MLTM16K` | 4608 | 6375 | 4608 | 6375 |
+| `8K` | `MLTM8K` | 6308 | 9166 | 6307 | 9166 |
+| `A3` | `A3` | 7016 | 9925 | 7016 | 9924 |
+| `A4` | `A4` | 4958 | 7016 | 4957 | 7016 |
+| `A5` | `A5` | 3500 | 4958 | 3499 | 4957 |
+| `A6` | `A6` | 2475 | 3500 | 2475 | 3499 |
+| `B4` | `JISB4` | 6075 | 8600 | 6075 | 8599 |
+| `B5` | `JISB5` | 4300 | 6075 | 4299 | 6075 |
+| `B6` | `JISB6` | 3025 | 4300 | 3024 | 4299 |
+| `Comm10` | `COM10` | 2475 | 5700 | 2475 | 5700 |
+| `EnvC6` | `C63OF4` | 2692 | 3825 | 2691 | 3825 |
+| `EnvDL` | `ENVDL` | 2600 | 5200 | 2599 | 5199 |
+| `EnvPersonal` | `C6ENV` | 2175 | 3900 | 2175 | 3900 |
+| `Executive` | `EXECUTIVE` | 4350 | 6300 | 4350 | 6300 |
+| `FabFoldGermanLegal` | `FLS3` | 5100 | 7792 | 5100 | 7791 |
+| `FLS_220X330` | `FLS4` | 5200 | 7792 | 5199 | 7791 |
+| `FLS_8D125X13D25` | `FLS5` | 4867 | 7958 | 4866 | 7957 |
+| `FLS_8D25X13` | `FLS2` | 4958 | 7792 | 4957 | 7791 |
+| `FLS_8D5X13D5` | `FLS6` | 5100 | 8100 | 5100 | 8100 |
+| `FLS_8X13` | `FLS1` | 4792 | 7792 | 4791 | 7791 |
+| `Legal` | `LEGAL` | 5100 | 8400 | 5100 | 8400 |
+| `Letter` | `LETTER` | 5100 | 6600 | 5100 | 6600 |
+| `Statement` | `INVOICE` | 3300 | 5100 | 3300 | 5100 |
+| `Tabloid` | `LEDGER` | 6600 | 10200 | 6600 | 10200 |
+
+`page_size_name` is read from the raster header. `PAPERWIDTH` always equals the raster
+width. When the page size is unknown, the code falls back to `width-1` / `height-1`.
+
+> Worked example for A4: raster 4958×7017 → image 4957×7016, BIH
+> `00 00 01 00 · 00 00 13 5d · 00 00 1b 68 · 00 00 00 80 · 00 00 03 48`.
+
+---
+
+## 10. Stage D — the ACMM colour-world stage (Φ)
+
+This was the hard part and the last thing to fall. It is worth reading even if you only want
+the algorithm: [§10.4](#104-the-algorithm) is the complete recipe, and everything before it
+is the evidence.
+
+### 10.1 The symptom
+
+For a **uniform** raster the halftone rule is trivial and exact. For any **non-uniform**
+page it was not: a single black column at input `x=100` on a white background produced dots
+only at `x=99`, at ~50 % coverage — the isolated sample behaved like *mid gray*, not black.
+An isolated 600-dpi dot vanished entirely.
+
+No linear kernel fit both the "black-in-white" and "white-in-black" responses. Falsified
+along the way: linear/shift-invariant filters, error diffusion, a resize through the screen,
+and `OCM_TonerSave` affecting the spatial stage. The stage is 1-D along `x` (rows are
+independent).
+
+### 10.2 How it was located
+
+A **hardware watchpoint** on the halftone source buffer, set in `SheetProcess`, fired in:
+
+```
+SheetProcess → SideProcess → CupsBandDraw → CupsOutColorConvertImageEx
+  → ImoColorConvertImageEx (OCM) → ImoCmmConvertImage (OCM)
+  → ImxCmmWorldApplyImageEx → ACMM_fApplyColorWorld → PCM_fColorWorldApply
+  → PCM_lfFilter8Eval3x1        ← writes the halftone source buffer, once per band
+```
+
+So the "anomaly" was never a halftone stage at all: it is an **ACMM colour-management
+filter element** applied while the grayscale raster is converted into the printer colour
+space, *before* texture/halftone. The halftone loop itself (`HalftoneImage1c1b`) contains no
+neighbourhood term — it just compares an already-computed tone against the screen.
+
+### 10.3 Φ is a 33³ table lookup
+
+`PCM_lfFilter8Eval3x1` reads a three-sample sliding window and produces one byte via
+**tetrahedral interpolation of a 33×33×33 byte table**. The element object
+(`rsi->0x18` at the call) carries the table pointer at `+0x78`.
+
+Φ is **inverted**: `Φ(0,0,0) = 255` and `Φ(255,255,255) = 0`. That is not a mistake — the
+table comes from `sGrayInv.icm`, an *inverse* gray transform, so 8-bit raster black maps to
+the maximum halftone tone.
+
+Measured values from the dumped table (raster bytes in, tone = `max(0, Φ−10)` out):
+
+| `(s0,s1,s2)` | Φ | tone (toner save on) |
+|---|---|---|
+| `(0,0,0)` | 255 | 245 |
+| `(255,255,255)` | 0 | 0 |
+| `(255,0,0)` | 125 | 115 |
+| `(0,0,255)` | 185 | 175 |
+| `(255,125,255)` | 79 | 69 |
+| `(255,127,255)` | 78 | 68 |
+
+The last two lines are the reason the stage cannot be modelled as a function of the mean:
+21 values apart in mean, 1 apart in output. Uniform-field behaviour collapses too —
+`Φ(g,g,g)` is `255` at `g=0`, `0` at `g=255`, and `254-g` otherwise (verified exhaustively
+over all 256 values).
+
+### 10.4 The algorithm
+
+`Φ(s0,s1,s2)` — exactly as implemented in `src/acmm.c`:
+
+```
+bcode(s) = ((s & 7) << 5) + (s >> 3)          # fraction in bits 7..5, lattice cell in 4..0
+base     = (s0 >> 3)*1089 + (s1 >> 3)*33 + (s2 >> 3)    # 1089 = 33*33, 33 = 33
+f[0..2]  = bcode(s0), bcode(s1), bcode(s2)
+
+# stable ascending sort of the three axes by code (ties keep original order)
+sort f ascending, tracking idx[0..2]
+
+c[3] = {0,0,0}
+acc  = (255 - f[idx[2]]) * L[base + c[0]*1089 + c[1]*33 + c[2]] ; c[idx[2]] = 1
+acc += (f[idx[2]] - f[idx[1]]) * L[base + c[0]*1089 + c[1]*33 + c[2]] ; c[idx[1]] = 1
+acc += (f[idx[1]] - f[idx[0]]) * L[base + c[0]*1089 + c[1]*33 + c[2]] ; c[idx[0]] = 1
+acc +=  f[idx[0]]          * L[base + c[0]*1089 + c[1]*33 + c[2]] ; c[idx[0]] = 1
+
+Φ = (acc * 0x80808081) >> 39        # exact acc / 255
+```
+
+* `L` is the 35937-byte table, indexed as `[(s0>>3)][(s1>>3)][(s2>>3)]` with strides
+  `1089, 33, 1`.
+* The sort is **stable** on ties, matching the vendor's compare/`jae` chain.
+* `0x80808081 >> 39` is the vendor's exact integer divide-by-255.
+
+This reproduces the vendor's tone buffer **byte-exactly (4093/4093 sampled samples)**, and
+with it the whole pipeline passes.
+
+### 10.5 The source buffer is contiguous, so the window wraps
+
+The CMM does not look at `[x, x+1, x+2]` inside one row only. The vendor keeps the page as
+**one contiguous buffer whose row stride is `S = round_up(width, 4)`**, and the 3-tap window
+is a linear read. So at the right edge the window **wraps into the next row**:
+
+```
+byte index:  0 .. S-1        S        S+1
+contents:    raster row       next raster row's byte 0, byte 1
+             (zero-padded from width to S)
+```
+
+Call the two wrap bytes `w0 = B[S]` and `w1 = B[S+1]`. Then:
+
+* at `x = S-2` the third tap is `B[S]` = `w0`;
+* at `x = S-1` the taps are `B[S], B[S+1]` = `w0, w1`.
+
+This only bites when `xd` reaches into the wrap region, i.e. when `S - xd ≤ 2`. For the
+corpus papers that is most of them — `xd == S` for 16K, A3, FabFoldGermanLegal, FLS_8D5X13D5,
+Legal, Letter, Statement and Tabloid; `xd == S-1` for 8K, A5, A6, B4, B5, Comm10, EnvC6,
+EnvDL, EnvPersonal, FLS_220X330 and FLS_8X13; `xd == S-2` for Executive and FLS_8D125X13D25.
+It is exactly the bug in [§13.2](#132-case-study-the-16k-one-byte).
+
+### 10.6 The band model
+
+The CMM is invoked on **bands** of `band_h = floor(2²⁴ / S)` rows (a 2²⁴-byte working-set
+limit), and the vendor reuses a fixed pair of src/dst band buffers. At a band's **last row**
+the wrap bytes are therefore *not* the next page row:
+
+| Situation | `w0, w1` |
+|---|---|
+| full band (`blen == band_h`) | `fb0, fb1` — the raw Φ of the band's **first** row, pixels 0 and 1 (the dst buffer is adjacent/reused, so reading past the band lands in it) |
+| last partial band | the first two raster bytes of page row `(k-1)*band_h + blen`, when that row exists |
+| otherwise | `0, 0` |
+
+Rows past the end of the raster are all-zero.
+
+`src/encode.c` models this with a two-row window (`ra`, `rb`), an accumulating `r2[y]` of
+"first two bytes of page row y", and an explicit `wb[2]` array for the band-last case.
+
+### 10.7 The tone transform (`OCM_TonerSave`)
+
+After the CMM, a pointwise transform is applied:
+
+```
+tone = max(0, Φ - (OCM_TonerSave ? 10 : 0))
+```
+
+* absent or `TRUE` → subtract 10;
+* `FALSE` → pass through unchanged.
+
+**Proof.** Cases 034 and 035 have *byte-identical* input rasters
+(md5 `dd6b805ddf5f439466f007b584208914`) but different vendor outputs, and the vendor opens
+exactly the same files — so the difference is a purely in-memory tone transform. For 22
+distinct sampled value pairs, `tone_FALSE = tone_TRUE + 10` held exactly, and rebuilding the
+outputs with that relation reconciled both cases. (Note the effect is *not* a spatial one —
+the dumped 33³ table is identical for both settings.)
+
+### 10.8 Verified against the vendor
+
+* Φ byte-exact on vendor-captured tone buffers (full 33³ coverage).
+* The **full 16K band-1 bitmap** — 12 602 880 pixels — matches the model with **0
+  mismatches**, using vendor-captured tone and screen. The vendor screen matches `.hft`
+  plane 0 exactly.
+
+---
+
+## 11. Stage E — the halftone screen
+
+The filter maps each 8-bit tone sample to one output bit through the installed `COPA`
+screen.
+
+### 11.1 The `.hft` file format
+
+```
+0x00  "tHsG"                 magic
+0x04  u32 version = 5
+0x0c  records, 12 bytes each: {u32 offset, u32 size, u16 id, u16 flags}
+        r0: off=0x44  size=0x2408  id=1   <- plane 0
+        r1: off=0x244c size=0x4008 id=2
+        r2: off=0x6454 size=0x4008 id=3
+        r3: off=0xa45c size=0x4008 id=4
+        r4: off=0xe464 size=0x4008 id=?
+0x44  plane-0 sub-header: {u16 width=96, u16 height=96, u16, u16}
+0x4c  plane-0 data: 96×96 = 9216 bytes, one 8-bit threshold per cell (values 1..255)
+```
+
+Five planes; plane 0 is 96×96 (128×128 for planes 1–4). Only **plane 0** is used by the
+600×600 path. `COPA.DEFAULT.1200x600.hft` has a 192×96 plane 0.
+
+`src/halftone.c` parses this and loads plane 0. The screen is **never embedded** — it is
+loaded at runtime (`KONICA_HFT`, else the vendor install path).
+
+A missing screen is a hard error for both. Measured with the `.hft` temporarily removed:
+the **vendor writes nothing at all and exits 2** (its `HalftonesInit` fails before any
+output); the **kit writes the 119-byte job header, reports the error and exits 1**.
+
+### 11.2 The per-pixel rule
+
+Disassembly of `HalftoneImage1c1b` shows a per-pixel unsigned compare:
+
+```
+dot(x, y) = ( tone[x] >= screen[(page_row) % 96][x % 96] )      # cmp / setae
+```
+
+The **row phase is the page row**, not a per-band row, and the column phase is `x % 96`.
+
+The full model is therefore:
+
+```
+tone[x] = max(0, Φ(src[x], src[x+1], src[x+2]) - (OCM_TonerSave ? 10 : 0))
+dot(x,y) = ( tone[x] >= screen[y % 96][x % 96] )
+```
+
+`src/halftone.c` exposes `halftone_row(ht, tone, width, y, out)`, taking the precomputed
+tone row — the screen compare is all it does.
+
+For a uniform raster this collapses to the flat-tone rule that reproduced blank/solid pages
+from the very first day (see [§10.3](#103-φ-is-a-33-table-lookup)).
+
+---
+
+## 12. Stage F — the JBIG1 encoder
+
+Each page payload is a single **ITU-T T.82 (JBIG1)** bi-level image, encoded by `src/jbig.c`
+from the T.82 tables — no third-party encoder is vendored.
+
+### 12.1 Bi-level Image Header (20 bytes, as the vendor writes it)
+
+```
+00 00 01 00   DL=0, D=0, planes=1, reserved
+Xd  (u32 BE)  image width
+Yd  (u32 BE)  image height
+l0  (u32 BE)  = 128          lines per stripe
+00 00         mx = 0, my = 0 no adaptive-template movement
+03            order = ILEAVE | SMID   (irrelevant: single plane)
+48            options = LRLTWO(0x40) | TPBON(0x08)
+```
+
+Sizes: blank A4 payload = 132 bytes; fully-solid A4 = 132452 bytes.
+
+### 12.2 Entropy coding
+
+* 128-line stripes.
+* The **LRLTWO** two-line template and **TPBON** typical prediction, exactly as jbigkit.
+* Each stripe is terminated with the marker `FF 02` (SDNORM).
+* Per stripe the coder is re-initialised (fresh `c`, `a`, `sc`, `ct`, output buffer) but the
+  **statistics table `st[4096]` persists across stripes** — it is cleared only before
+  stripe 0. This is jbigkit's `arith_encode_init(se, reset)`, and it matters.
+* The LTP bit carries across stripes; the image's first line is compared against an all-zero
+  line.
+
+### 12.3 The two quirks
+
+Both are *deviations from jbigkit's defaults*, and both are required:
+
+1. The coder must **not strip trailing zero bytes** from a stripe's SDE buffer before writing
+   `FF 02` (jbigkit's `jbg_buf_remove_zeros` must be disabled).
+2. The finished BIE is **zero-padded to a multiple of 4 bytes**.
+
+### 12.4 Verification
+
+Feeding `src/jbig.c` the 1-bit image decoded from each vendor BIE reproduces **all 60 BIEs
+byte-for-byte**. Independently, `src/jbig.c`'s `qm_encode` / `qm_flush` / stripe loop were
+compared line-for-line with jbigkit-2.2's `arith_encode`, `arith_encode_flush` and
+`encode_sde`, and — as a cross-check on the whole encoder — encoding a page bitmap with
+jbigkit-2.2 and with `src/jbig.c` produced **the same BIE**.
+
+That last experiment is what cleared the JBIG encoder during the 16K investigation and
+redirected attention to the CMM ([§13.2](#132-case-study-the-16k-one-byte)).
+
+---
+
+## 13. Bug archaeology
+
+Three non-obvious problems shaped the final code. They are recorded because they show the
+*diagnostic method*, which is as valuable as the fix.
+
+### 13.1 Case study: `OCM_TonerSave`
+
+The corpus contained a controlled experiment: cases 034 and 035 differ *only* in
+`OCM_TonerSave`, and their rasters are byte-identical. The vendor outputs differ by ~13 % in
+size. The first guess was that this was a spatial effect; the dumped 33³ table proved it was
+not (identical for both). Dumping the *halftone input* buffer for both cases showed
+`tone_FALSE = tone_TRUE + 10` for every sampled pair — a pointwise baseline shift, nothing
+more. See [§10.7](#107-the-tone-transform-ocm_tonersave).
+
+This also explains the default: absent ≡ TRUE, because a job with no `OCM_TonerSave` and a
+job with `=TRUE` produced identical output.
+
+### 13.2 Case study: the 16K one-byte
+
+After the toner-save fix the suite stood at **59/60**. The only failure was
+`037-size-16K`: both files 3328 bytes, exactly **one byte** differing, at file offset 3278 —
+the last coded data byte of the last stripe, immediately before the `ff 02` SDNORM marker.
+Ours `0x20`, vendor `0x2c`.
+
+Everything about the JBIG encoder was already proven (bitmap identical, coder identical to
+jbigkit). So the search narrowed to: *is the input to the encoder really identical?*
+
+**The method that cracked it.** Rather than guessing, decode both streams and compare the
+decoded images:
+
+```sh
+/tmp/decjbg /tmp/vend037.bie /tmp/dec_vend.raw     # jbigkit-2.2 decoder
+/tmp/decjbg /tmp/ours037.bie /tmp/dec_ours.raw
+cmp -l /tmp/img037.bin /tmp/dec_vend.raw
+```
+
+That gave a single differing **pixel**: page row 6374, `x = 4606`. Dumping our tone row
+(`int tone[xd]`) and comparing it with the vendor-captured tone row showed our tone was
+`175` where the vendor's was `245` — at that one pixel.
+
+Working backwards through the window:
+
+* at `x = 4606 = S-2`, the taps are bytes `4606, 4607, 4608`;
+* byte `4608 == S` is the first wrap byte `w0`;
+* but `src/encode.c` used `w1` for *any* `x+2 >= S`.
+
+Concretely: `ra[4606] = ra[4607] = 0` and `w0 = 0, w1 = 255`, so
+`Φ(0,0,0) = 255 → tone 245` (vendor) versus `Φ(0,0,255) = 185 → tone 175` (ours).
+
+The fix is to index the wrap bytes by their true offset:
+
+```c
+unsigned wb[2] = { w0, w1 };
+if (x + 1 < S) v1 = ra[x + 1]; else v1 = band_last ? wb[x + 1 - S] : rb[x + 1 - S];
+if (x + 2 < S) v2 = ra[x + 2]; else v2 = band_last ? wb[x + 2 - S] : rb[x + 2 - S];
+```
+
+The bug only became visible in `037-size-16K`: the wrong tap changed the last pixel of the
+last row, where the two wrap bytes happened to differ (`w0 = 0`, `w1 = 255`). **60/60.**
+
+> Lesson: when one byte differs at the very end of a compressed stream, do not assume the
+> coder. Decode both sides and diff the *reconstructed* data.
+
+### 13.3 The drain fix
+
+`libcups` writes `height` raster rows per page, but the device image is only `yd` rows
+(`yd == height - 1` for most papers). If the reader stops at `yd`, the next page's header is
+read from inside the previous page's pixels. `src/encode.c` therefore drains the remaining
+rows before finishing a page. Multi-page cases (029–033, 036) are how this was caught.
+
+---
+
+## 14. Verification
+
+### 14.1 Method
+
+The only meaningful test is **byte-for-byte comparison against captured vendor output**:
+
+```sh
+tests/difftest.sh /root/konica-corpus-full
+```
+
+`difftest.sh` runs the candidate on each corpus `.ras` and `cmp`s its stdout with the
+captured `.prn`; failures are localised with `tools/prnscan.py`.
+
+### 14.2 Results
+
+| Check | Result |
+|---|---|
+| `tests/difftest.sh` (glibc) | **PASS: 60 (masked: 0) · FAIL: 0** |
+| `tests/difftest.sh` (Alpine 3.20.3 / musl 1.2.x, gcc 13.2.1) | **PASS: 60 · FAIL: 0** |
+| Strict build (`-Wsign-conversion -Wconversion -Wshadow`) | clean, glibc and musl |
+| `make check-reader` (reader vs libcups) | 27/27 |
+| Fresh `git clone` → build → test | 60/60 |
+
+A fresh clone was verified specifically so that the committed tree (not the working tree)
+is what was tested.
+
+### 14.3 Independent cross-checks
+
+* **JBIG:** 60/60 BIEs re-encoded byte-for-byte from decoded bitmaps; line-for-line
+  agreement with jbigkit-2.2's coder; identical output to jbigkit-2.2 on the same bitmap.
+* **Screen:** the vendor's runtime screen matches `.hft` plane 0 exactly.
+* **CMM:** Φ byte-exact on vendor-captured tone buffers; full 12.6 Mpixel band bitmap,
+  0 mismatches.
+* **Reader:** 27/27 against libcups across 9 colour/depth combinations and 3 raster versions.
+* **Toner save:** 034/035 reconciled via the measured `+10` relation.
+
+### 14.4 What has *not* been verified
+
+* Page sizes, raster formats or option combinations **absent from the corpus** are handled
+  by the model but not exercised end-to-end. The reader (and `--dump`) is cross-checked on
+  1-bit gray and RGB/CMYK rasters, but the *filter* path only converts 8-bit and 1-bit gray
+  (`to_gray`, `src/encode.c`) — the corpus exercises 8-bit gray only.
+* The LUT generator (see below).
+
+---
+
+## 15. The one open item: LUT provenance
+
+`konica-native` is byte-exact, but it is not fully *self-contained*: it needs a dump of the
+vendor's 33³ table.
+
+**Why it must be a dump.** The table is not a file the vendor ships. The vendor **computes**
+it at runtime from the installed gray profile (`sGrayInv.icm`, 668 bytes — far too small to
+contain a 33³ table):
+
+```
+PCM_fColorWorldCreateFromConversion → … → PCM_lfCompositBasicTakeUp
+```
+
+Two rules forbid the alternatives: the kit must not embed vendor tables, and it must not
+guess bytes. So the kit loads the table at runtime:
+
+* `KONICA_LUT=/path/to/lut33.bin` — 35937 bytes,
+  sha256 `84a424f5cccdbe7070b3f926fe9834b515db69391440ccac1dc5b046622c6d6f`;
+* `tools/dump-lut.gdb` reproduces it from the running filter ([§16.2](#162-dumping-the-33³-lut));
+* unset → `src/encode.c` falls back to the flat-tone approximation, which reproduces the
+  historical 7/60 subset.
+
+**What is known about the table**, for whoever reproduces the generator:
+
+* it is content-independent, and identical for `OCM_TonerSave` on/off;
+* it is inverted: `Φ(0,0,0) = 255`, `Φ(255,255,255) = 0`;
+* it is not a function of the mean alone: `Φ(255,125,255) = 79` vs `Φ(255,127,255) = 78`;
+* `Φ(g,g,g)` = `255` (g=0), `0` (g=255), `254-g` otherwise.
+
+**Two routes:**
+
+1. **Profile it.** Test a hypothesis of the form `Φ(s0,s1,s2) = h(TRC(...))` exhaustively
+   against the 35937-byte dump — a full check takes milliseconds.
+2. **Disassemble the generator.** Break on `PCM_fColorWorldCreateFromConversion` and
+   single-step the 33³ fill loop.
+
+Until then, `KONICA_LUT` is the documented, reproducible interface.
+
+---
+
+## 16. Reproduction recipes
+
+### 16.1 Environment (all vendor invocations)
+
+```sh
+F=/usr/local/lib/konica/KonicaMinolta/245igdi/Filters/245igdirf
+export PPD=/var/lib/legacy-printer-app/ppd/KonicaMinolta-206-fullbleed.ppd
+export CONTENT_TYPE=application/vnd.cups-raster
+export FINAL_CONTENT_TYPE=application/vnd.cups-raster
+export CUPS_SERVERROOT=/etc/cups
+export CUPS_DATADIR=/usr/share/cups
+export LD_LIBRARY_PATH=/usr/local/lib/konica/lib
+```
+
+### 16.2 Dumping the 33³ LUT
+
+`tools/dump-lut.gdb` breaks at `PCM_lfFilter8Eval3x1`'s entry (`0x4512d0`). The element
+object is **`rsi->0x18`** (the eval prologue overwrites `r8`, which is the 5th argument, not
+the element), and the table pointer is at `element + 0x78`.
+
+```sh
+gdb -q -batch -x tools/dump-lut.gdb --args "$F" 1 u t 1 "$OPTS" \
+    < /root/konica-corpus-full/corpus/037-size-16K.ras
+# → /tmp/lut33.bin ; sha256 84a424f5…c6d6f
+```
+
+### 16.3 Capturing tone rows / bitmaps (how the model was pinned)
+
+Break at the CMM inner-loop head `*0x4513d3`: `r12` is the source row pointer,
+`*(long*)($rsp-0x58)` the destination row pointer, and `r8` the element. Break at
+`*0x4512d0` (entry) to reach the descriptors: `*(rcx+0x18)` = source descriptor,
+`*(r8+0x18)` = destination descriptor. Descriptor fields: `+0x10` width, `+0x18` height,
+`+0x20` stride, `+0x28` buffer pointer.
+
+`HalftoneImage1c1b` (`0x4133fd`, returns at `0x41370e`) ABI: `rdi` = halftone record,
+`rsi` = tone/source descriptor, `rdx` = bitmap/destination descriptor, `rcx` = phase struct.
+`arg4[0]` = column phase, `arg4[1]` = starting page row.
+
+These captures produced the tone buffers (`/tmp/k16_tone.bin`), the band bitmap
+(`/tmp/k16_bm.bin`) and the halftone-input buffers used throughout [§10](#10-stage-d--the-acmm-colour-world-stage-φ).
+
+### 16.4 Disassembly toolkit
+
+```sh
+O=/usr/local/lib/konica/KonicaMinolta/245igdi/Filters/mtorf.ocm
+nm "$F" | grep -iE 'halftone|imx' > /tmp/filter.syms
+objdump -d --no-show-raw-insn "$F" > /tmp/filter.asm
+objdump -d --no-show-raw-insn "$O" > /tmp/ocm.asm
+```
+
+### 16.5 Independent JBIG oracle (diagnosis only, never vendored)
+
+jbigkit-2.2 built in `/tmp` was used to cross-check the encoder: encode a bitmap with
+`jbg_enc_init(&s, xd, yd, 1, p, wr, f)` + `jbg_enc_options(...)` + `jbg_enc_out(&s)`; decode
+a BIE with `jbg_dec_init` / `jbg_dec_in` / `jbg_dec_getimage`. This is read-only diagnostic
+use — no jbigkit code is in the kit.
+
+### 16.6 Running the suite
+
+```sh
+make
+KONICA_LUT=/tmp/lut33.bin tests/difftest.sh /root/konica-corpus-full
+make check-reader
+```
+
+---
+
+## 17. Code map
+
+| File | Lines | Role |
+|---|---|---|
+| `src/main.c` | 101 | filter entry point; parses `Duplex`, `OCM_TonerSave`; `--dump` reader check |
+| `src/raster.c` / `.h` | 153 / 41 | pure-libc CUPS raster reader (v1, v2-RLE, v3) |
+| `src/encode.c` / `.h` | 277 / 23 | PJL framing, page geometry, bands, edge wrap, tone, chunking |
+| `src/acmm.c` / `.h` | 53 / 37 | Φ: 33³ tetrahedral interpolation |
+| `src/halftone.c` / `.h` | 61 / 35 | `.hft` loader + per-pixel screen rule |
+| `src/jbig.c` / `.h` | 203 / 29 | JBIG1 encoder (BIH, QM coder, stripes, padding) |
+| `tests/difftest.sh` | 37 | differential test vs captured vendor output |
+| `tests/check-reader.sh` | 47 | reader cross-check vs libcups |
+| `tests/libcups_dump.c` | 31 | libcups-based reader oracle |
+| `tools/dump-lut.gdb` | 37 | reproducible 33³ LUT extraction |
+| `tools/capture-corpus.sh` | 129 | corpus capture (L0) |
+| `tools/mkraster.c` | 185 | synthetic CUPS raster generator |
+| `tools/prnscan.py` | 246 | scan / diff / cmpmask / manifest |
+
+Call graph for a page:
+
+```
+main → enc_job_begin
+     → (per page) enc_page
+            ras_read_line (per row)
+            acmm_phi (per pixel)
+            halftone_row (per row)
+            jbig_encode_bie (per page)
+            sink_write (chunked)
+     → enc_job_end
+```
+
+---
+
+## 18. Glossary and address index
+
+| Symbol | Address | Role |
+|---|---|---|
+| `HalftoneImage1c1b` | `0x4133fd` | the 8-bit→1-bit halftone loop (returns `0x41370e`) |
+| `HalftoneImageAnyMulti` | `0x411bf4` | generic multi-plane screen variant |
+| `TextureImagePlane1b` | `0x426d31` | allocates the output plane, calls the fn pointer |
+| `ImxHalftoneTextureImage` | `0x428d63` | dispatch on halftone format id |
+| `ImxErrDiff*` | `0x41006c…` | separate error-diffusion module — **not used** here |
+| `ImoTextureImageEx` | `0x19b60` (ocm) | applies the pointwise tone LUT then halftones |
+| `ImoColorConvertImageEx` | `0x19e40` (ocm) | colour conversion entry (CMM lives under here) |
+| `ImoCmmConvertImage` | `0x146e0` (ocm) | CMM conversion stage |
+| `ImxCmmWorldApplyImageEx` | `0x14130` (ocm) | applies the colour world to an image |
+| `ACMM_fApplyColorWorld` | `0x42f3de` | colour-world dispatch |
+| `PCM_fColorWorldApply` | `0x4373b4` | colour-world apply |
+| `PCM_lfFilter8Eval3x1` | `0x4512d0` | **the 3-tap filter element** (inner-loop head `0x4513d3`) |
+| `PCM_fColorWorldCreateFromConversion` | `0x43634e` | builds the 33³ table (open item) |
+
+| Term | Meaning |
+|---|---|
+| **BIE** | Bi-level Image Entity — the JBIG1 header + coded data |
+| **BIH** | Bi-level Image Header — the first 20 bytes |
+| **Φ (Phi)** | the ACMM 3-tap colour-world function |
+| **LRLTWO** | JBIG two-line template (option bit `0x40`) |
+| **TPBON** | typical prediction for bi-level (option bit `0x08`) |
+| **SDNORM** | stripe marker `FF 02` |
+| **SDE** | stripe data entity |
+| **tone** | the 8-bit value compared against the screen |
+| **`w0`, `w1`** | bytes `S` and `S+1` of a row — the CMM's edge-wrap taps |
+
+---
+
+## 19. Appendices
+
+### 19.1 Worked example — a complete minimal stream (A4 blank)
+
+```text
+\x1b%-12345X@PJL
+@PJL SET COMPRESS=JBIG
+@PJL SET COVER=OFF
+@PJL SET HOLD=OFF
+@PJL SET SECTION=OFF
+@PJL SET COPIES=1
+@PJL SET PAGESTATUS=START
+@PJL SET DUPLEX=OFF
+@PJL SET PAPER=A4
+@PJL SET PAPERWIDTH=4958
+@PJL SET PAPERLENGTH=7016
+@PJL SET MEDIASOURCE=AUTO
+@PJL SET MEDIATYPE=PLAIN
+@PJL SET RESOLUTION=600
+@PJL SET IMAGELEN=132
+  <<< 132 raw bytes: a whole-page JBIG BIE >>>
+@PJL SET PAGESTATUS=END
+@PJL EOJ
+\x1b%-12345X
+```
+
+### 19.2 Deriving Φ in a spreadsheet / Python
+
+The complete function is 20 lines — see [§10.4](#104-the-algorithm), or `src/acmm.c`
+(53 lines including I/O). To check a hypothesis against the dump:
+
+```python
+lut = open('/tmp/lut33.bin','rb').read()     # 35937 bytes
+def bcode(s): return ((s & 7) << 5) + (s >> 3)
+# ... the four weighted terms as in §10.4, then (acc * 0x80808081) >> 39
+```
+
+### 19.3 Option/geometry quick reference
+
+* 600 dpi, 8-bit gray, `CUPS_CSPACE_W`, CUPS raster v2 (RLE).
+* A4 raster 4958×7017 → image 4957×7016.
+* Chunk size 32768; `l0` 128; options `0x48`; order `3`.
+* `OCM_TonerSave` subtracts 10 (default on).
+
+### 19.4 Change log for this document
+
+* **2026-10-15** — created. Consolidates `REVERSE-ENGINEERING.md`,
+  `DEVICE-STREAM.md` and the port notes; records the 16K edge-wrap fix, the
+  `OCM_TonerSave` proof, the verified Φ model, the verified LUT dump recipe, and the
+  60/60 result on glibc and musl.
+* Corrections folded in while consolidating: the uniform-field response is
+  `Φ(g,g,g) = 254-g` (not `255-g`) for `1 ≤ g ≤ 254`; the early notes' Φ arguments were
+  `I = 255 - gray`, so their `Φ(255,255,0)=185` is this document's `Φ(0,0,255)=185`.

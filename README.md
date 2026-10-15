@@ -60,7 +60,8 @@ tests/            differential + reader cross-check harnesses
 
 ## Documentation
 
-* `docs/REVERSE-ENGINEERING.md` — how every stage was derived and verified (start here).
+* `docs/COMPLETE-NOTES.md` — **the master record**: the whole project end to end (start here).
+* `docs/REVERSE-ENGINEERING.md` — the long-form derivation and evidence trail.
 * `docs/DEVICE-STREAM.md` — the condensed device-stream format spec.
 * `docs/ALPINE.md`, `docs/ALPINE-PORT-STATUS.md` — musl/Alpine port status.
 * `README-RE.md` — historical project README (superseded by `docs/`).

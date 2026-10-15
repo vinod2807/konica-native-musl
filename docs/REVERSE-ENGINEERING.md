@@ -401,9 +401,11 @@ dot(x,y) = ( tone[x] >= screen[y % H][x % W] )      # unsigned compare, setae
 tone[x] = max(0, Φ(src[x], src[x+1], src[x+2]) - (OCM_TonerSave ? 10 : 0))
 ```
 
-For the trivial case of a **uniform** raster the ACMM stage is the identity, so
-`tone = 245 - gray` (or `255 - gray` when `OCM_TonerSave` is off), reproducing blank,
-solid and every flat tone byte-for-byte — including `002-simplex-solid`:
+For a **uniform** raster the window is `(g,g,g)`, so the ACMM stage collapses to
+`Φ(g,g,g) - (OCM_TonerSave ? 10 : 0)`. Exhaustively over the dumped table, `Φ(g,g,g)` is
+`255` at `g=0`, `0` at `g=255`, and `254 - g` for `1 ≤ g ≤ 254` — i.e. *almost* `255 - g`.
+That reproduces blank, solid and every flat tone byte-for-byte — including
+`002-simplex-solid`:
 
 **Proof it is exact for uniform input.** Feeding a constant gray `g` gives, per pixel,
 exactly `[M(x,y) <= T(g)]` (mismatch = 0 over multiple 96×96 tiles), where `M` is plane 0
@@ -417,8 +419,9 @@ and:
 | 96 | 148 | 224 | 20 |
 | | | 255 | (none) |
 
-So `T(g) = 245 - g` (with a ±1 rounding detail at the low end). This reproduces
-**blank, solid and every flat tone byte-for-byte** — including `002-simplex-solid`.
+So `T(g) = 245` at `g = 0` and `244 - g` otherwise (the "±1 at the low end" is exactly the
+`g = 0` corner). This reproduces **blank, solid and every flat tone byte-for-byte** —
+including `002-simplex-solid`.
 
 ### 6.3 The non-uniform case — SOLVED
 
@@ -763,9 +766,12 @@ This section previously framed the same stage as an open problem. Kept for prove
 
 * The model was first pinned to a 3-tap, rightward, 1-row window by probes: e.g. `I(98)`
   affects only `T(96),T(97),T(98)`, and `Φ(64,0,64)=16` reproduced on two independent rows.
-* Early falsified hypotheses: linear 3-tap (`Φ(255,255,0)=185` vs a linear fit of 137),
-  additive-in-a-warped-domain (consistent but under-determined on the 5-level grid), error
-  diffusion, resize through the screen, and `OCM_TonerSave` affecting the spatial stage.
+* Early falsified hypotheses: linear 3-tap (a measured `Φ=185` where a linear fit predicts
+  137), additive-in-a-warped-domain (consistent but under-determined on the 5-level grid),
+  error diffusion, resize through the screen, and `OCM_TonerSave` affecting the spatial stage.
+  Caveat: the early notes wrote Φ over `I = 255 - gray`, while §9.1 uses the raster bytes
+  directly, so the arguments are complemented — the early `Φ(255,255,0)=185` is exactly
+  §9.1's `Φ(0,0,255)=185`.
 * The producing code was located by a hardware watchpoint on the halftone source buffer
   (`SheetProcess → … → PCM_fColorWorldApply → PCM_lfFilter8Eval3x1`), and its table layout
   enumerated (`obj+0x78` 33³ LUT, plus the small index tables now folded into `Φ`).
