@@ -69,6 +69,8 @@ tests/            differential + reader cross-check harnesses
 
 ## Documentation
 
+* `HANDOFF.md` — **self-contained handoff report** for an AI assistant or a new engineer:
+  status, full recovered model, exact verification commands, constraints and gaps.
 * `docs/COMPLETE-NOTES.md` — **the master record**: the whole project end to end (start here).
 * `docs/REVERSE-ENGINEERING.md` — the long-form derivation and evidence trail.
 * `docs/LUT-GENERATOR.md` — the recovered 33³ CMM table generator.
