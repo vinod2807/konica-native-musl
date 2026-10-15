@@ -134,13 +134,15 @@ tetrahedral interpolation of a 33³ byte LUT** over the contiguous source image 
 tone[x] = max(0, Φ(src[x], src[x+1], src[x+2]) - (OCM_TonerSave ? 10 : 0))
 ```
 
-`Φ` is implemented in `src/acmm.c`; the 33³ table is a vendor runtime table loaded from a
-dump via `KONICA_LUT` (see `docs/REVERSE-ENGINEERING.md` §9). With it the whole pipeline is
+`Φ` is implemented in `src/acmm.c`; the 33³ table itself is not a file the vendor ships —
+its CMM generates it at run time from the installed ICC profiles, and `src/lutgen.c`
+reproduces that generator exactly (see `docs/LUT-GENERATOR.md`). The whole pipeline is
 byte-exact.
 
 ## 4. Differential-test status
 
-Against `konica-corpus-full`: **60/60 byte-exact** (glibc and Alpine/musl), with the runtime
-LUT loaded via `KONICA_LUT`. The framing, the ACMM stage, the screen and the JBIG coder are
-each verified in isolation as well as end-to-end. Without `KONICA_LUT` the kit falls back to
-the flat-tone approximation and reproduces the historical 7/60 subset.
+Against `konica-corpus-full`: **60/60 byte-exact** (glibc and Alpine/musl), with the 33³
+table regenerated from the profiles at startup — no captured dump needed. The framing, the
+ACMM stage, the screen and the JBIG coder are each verified in isolation as well as
+end-to-end. `KONICA_LUT` can force a captured dump instead; if the profiles cannot be read
+the kit falls back to the flat-tone approximation and reproduces the historical 7/60 subset.

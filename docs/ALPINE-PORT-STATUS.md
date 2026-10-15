@@ -15,11 +15,14 @@ _Last updated: 2026-10-15._
 
   ```
   Makefile  README-RE.md
-  src/{main,raster,encode,jbig,halftone,acmm}.c  src/{raster,encode,jbig,halftone,acmm}.h
-  tests/{difftest.sh,check-reader.sh,libcups_dump.c}
-  tools/{capture-corpus.sh,dump-lut.gdb,mkraster.c,prnscan.py}
-  docs/{DEVICE-STREAM.md,REVERSE-ENGINEERING.md,ALPINE.md,ALPINE-PORT-STATUS.md}
+  src/{main,raster,encode,jbig,halftone,acmm,lutgen}.c  src/{raster,encode,jbig,halftone,acmm,lutgen}.h
+  tests/{difftest.sh,check-reader.sh,check-lutgen.sh,libcups_dump.c}
+  tools/{capture-corpus.sh,dump-lut.gdb,lutgen-dump.c,mkraster.c,prnscan.py}
+  docs/{LUT-GENERATOR.md,DEVICE-STREAM.md,REVERSE-ENGINEERING.md,ALPINE.md,ALPINE-PORT-STATUS.md}
   ```
+
+  (The tree is now a Git repository; this section is the original hand-tracked
+  snapshot and is kept as the record of that session.)
 
 * Build artifact `./konica-native` is produced by `make`; `tools/mkraster` and
   `tests/libcups_dump` are produced by `make check-reader`. **These are build artifacts, not
@@ -66,9 +69,14 @@ make CC=cc CFLAGS='-O2 -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow'
 # exit 0  (no warnings after the halftone.c size_t fixes in §4)
 
 sh tests/check-reader.sh      # PASS 27 / FAIL 0 / SKIP 0
-KONICA_LUT=/tmp/lut33.bin ./tests/difftest.sh /root/konica-corpus-full
+make check-lutgen             # PASS: regenerated 33³ CMM table == the vendor's
+./tests/difftest.sh /root/konica-corpus-full
 # PASS: 60 (of which masked: 0)   FAIL: 0
 ```
+
+(The `KONICA_LUT=/tmp/lut33.bin` prefix seen in earlier revisions of this log is no
+longer needed: the table is regenerated from the installed ICC profiles. See
+`docs/LUT-GENERATOR.md`.)
 
 ### 3.2 Native Alpine / musl
 
@@ -86,12 +94,19 @@ chroot $T/rootfs sh -c "cd /work && make CC=cc CFLAGS='-O2 -std=c11 -Wall -Wextr
 # exit 0  (clean)
 
 chroot $T/rootfs sh -c 'cd /work && sh tests/check-reader.sh'   # PASS 27 / FAIL 0 / SKIP 0
-chroot $T/rootfs sh -c 'cd /work && KONICA_LUT=/tmp/lut33.bin ./tests/difftest.sh /corpus'
+chroot $T/rootfs sh -c 'cd /work && make check-lutgen'          # PASS (byte-identical table)
+chroot $T/rootfs sh -c 'cd /work && ./tests/difftest.sh /corpus'
 # PASS: 60 (of which masked: 0)   FAIL: 0
 ```
 
 **Re-verified on Alpine 3.20.3 / gcc 13.2.1 / musl 1.2.x (2026-10-15):** the musl build is
 warning-clean and the differential test reports `PASS: 60   FAIL: 0`, identical to glibc.
+
+**Re-verified again on Alpine 3.24.2 / musl 1.2.5 (2026-10-15, `lut-generator` branch):** after
+adding the CMM table generator (`src/lutgen.c`), the musl build is still warning-clean,
+`tests/difftest.sh /corpus` reports `PASS: 60   FAIL: 0` with the table **regenerated from the
+installed ICC profiles** (no `KONICA_LUT`), `make check-lutgen` passes (byte-identical table,
+sha256 `84a424f5…c6d6f`) and `make check-reader` is 27/27.
 
 **Conclusion:** the source is already musl-clean and produces **identical results** on glibc
 and musl (60/60 corpus, 27/27 reader). No source portability defect was found.

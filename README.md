@@ -25,31 +25,40 @@ make
 
 ```sh
 make check-reader                                  # reader vs libcups: 27/27
-KONICA_LUT=/path/to/lut33.bin tests/difftest.sh /path/to/konica-corpus
+make check-lutgen                                  # regenerated CMM table vs the vendor's
+tests/difftest.sh /path/to/konica-corpus
 ```
 
 The differential test reproduces the vendor filter's captured output byte-for-byte:
-`PASS: 60   FAIL: 0` (verified on glibc and on Alpine/musl).
+`PASS: 60   FAIL: 0` (verified on glibc and on Alpine/musl). It needs no captured
+table: the colour-management table is regenerated from the installed ICC profiles.
 
 ## Runtime data
 
-Two things are loaded at runtime rather than compiled in, because they are vendor
-runtime tables (not redistributable, and not reimplemented):
+Two things are loaded at runtime rather than compiled in:
 
 | Variable | What | Default |
 |---|---|---|
 | `KONICA_HFT` | the halftone screen `.hft` | the vendor install path |
-| `KONICA_LUT` | the 33³ colour-world lookup table | *none* — a flat-tone fallback is used when unset |
+| `KONICA_SRGB` | input matrix/shaper profile `sRGB.icm` | the vendor install path |
+| `KONICA_GRAY` | output grey profile `sGrayInv.icm` | the vendor install path |
+| `KONICA_LUT` | a captured 33³ table (optional override) | *unset* — the table is generated |
 
-`tools/dump-lut.gdb` reproduces `KONICA_LUT` from the running vendor filter. When it is
-not supplied the filter still runs, but only flat-tone pages are exact (the historical
-7/60 subset). See `docs/REVERSE-ENGINEERING.md` §9.5.
+The CMM table is not a file the vendor ships: its colour engine generates it from
+the two profiles at start-up, and `src/lutgen.c` reproduces that generator exactly
+(byte-identical on glibc and musl). `KONICA_LUT` remains as an explicit override and
+cross-check; `tools/dump-lut.gdb` captures the vendor's own table.
+
+If the profiles cannot be read, the filter still runs but falls back to the
+flat-tone approximation (the historical 7/60 subset), printing the reason once.
+See `docs/LUT-GENERATOR.md`.
 
 ## Layout
 
 ```
 src/encode.c      PJL framing, page assembly, bands, right-edge wrap, OCM_TonerSave
 src/acmm.c        the ACMM 3-tap colour-world stage (33^3 LUT tetrahedral interpolation)
+src/lutgen.c      regenerates the 33^3 table from the installed ICC profiles
 src/halftone.c    .hft screen loader + per-pixel dot rule
 src/jbig.c        self-contained JBIG1 encoder
 src/raster.c      pure-libc CUPS raster reader (v1 / v2-RLE / v3)
@@ -62,6 +71,7 @@ tests/            differential + reader cross-check harnesses
 
 * `docs/COMPLETE-NOTES.md` — **the master record**: the whole project end to end (start here).
 * `docs/REVERSE-ENGINEERING.md` — the long-form derivation and evidence trail.
+* `docs/LUT-GENERATOR.md` — the recovered 33³ CMM table generator.
 * `docs/DEVICE-STREAM.md` — the condensed device-stream format spec.
 * `docs/ALPINE.md`, `docs/ALPINE-PORT-STATUS.md` — musl/Alpine port status.
 * `README-RE.md` — historical project README (superseded by `docs/`).

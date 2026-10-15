@@ -1,14 +1,14 @@
 # konica-native-musl — reverse-engineering kit for the 245igdirf filter
 
-> **STALE — read `docs/REVERSE-ENGINEERING.md`, `docs/DEVICE-STREAM.md`,
+> **STALE — read `docs/REVERSE-ENGINEERING.md`, `docs/DEVICE-STREAM.md`, `docs/LUT-GENERATOR.md`,
 > `docs/ALPINE.md` and `docs/ALPINE-PORT-STATUS.md` first; they supersede this file.**
 > This README describes the project *before* the device-stream side was reverse-engineered.
 > Current facts: the **whole pipeline is implemented and byte-exact on all 60 corpus cases**
 > (`src/encode.c`, `src/acmm.c`, `src/halftone.c`, `src/jbig.c`), verified on glibc **and**
-> Alpine/musl; the `OCM_TonerSave` default is **resolved** (absent behaves as TRUE); the only
-> non-self-contained piece is the 33³ colour-world LUT, which the kit loads from a runtime
-> dump (`KONICA_LUT`, see `docs/REVERSE-ENGINEERING.md` §9.5). The sections below are kept
-> for history.
+> Alpine/musl; the `OCM_TonerSave` default is **resolved** (absent behaves as TRUE); and the
+> kit is **fully self-contained** — the 33³ colour-world LUT is regenerated from the installed
+> ICC profiles by `src/lutgen.c` (see `docs/LUT-GENERATOR.md`), with `KONICA_LUT` now only an
+> optional override. The sections below are kept for history.
 
 **Status.** The raster-in side is done and verified; the device-stream side (everything
 the vendor filter does between raster and printer bytes) is **not implemented** and cannot

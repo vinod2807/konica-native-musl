@@ -24,7 +24,9 @@ apk add --no-cache cups-dev     # tests/check-reader.sh (builds mkraster + libcu
 ```
 
 The core filter uses **no** runtime dependencies beyond musl libc — no libcups, no libppd.
-CUPS packages are only needed for the reader cross-check, not to run the filter.
+(The build links `-lm` for the CMM colour transform's cube root; on musl the maths
+functions live in libc and `libm` is a compatibility stub. CUPS packages are only needed
+for the reader cross-check, not to run the filter.)
 
 ## Build
 
@@ -53,21 +55,28 @@ install (`/usr/local/lib/konica/KonicaMinolta/245igdi/Halftones/COPA.DEFAULT.600
 override with the `KONICA_HFT` environment variable. If the screen is missing the filter
 errors out and produces a 119-byte stub.
 
-The whole-page colour transform needs the vendor's 33³ ACMM lookup table as well. The kit
-does not bundle it; load a runtime dump with `KONICA_LUT=/path/to/lut33.bin`
-(`tools/dump-lut.gdb` reproduces it; see `docs/REVERSE-ENGINEERING.md` §9.5). If it is
-unset, the filter still runs, with a flat-tone approximation.
+The whole-page colour transform needs the vendor's 33³ ACMM lookup table. The vendor
+*computes* it at run time from the installed ICC profiles, and the kit regenerates the same
+table from them (`src/lutgen.c`), so **no dump is required**. The profiles default to the
+vendor install (`.../245igdi/Profiles/{sRGB,sGrayInv}.icm`); override with `KONICA_SRGB`
+and `KONICA_GRAY`. A captured dump can still be forced with `KONICA_LUT=/path/to/lut33.bin`
+(`tools/dump-lut.gdb` reproduces it; see `docs/LUT-GENERATOR.md`). If the profiles cannot be
+read the filter still runs, with a flat-tone approximation.
 
 ```sh
 # reader + writer cross-check vs libcups (needs cups-dev)
 make check-reader
 
+# regenerated CMM table vs the vendor's
+make check-lutgen
+
 # full differential corpus (needs python3 and the corpus)
-KONICA_LUT=/path/to/lut33.bin tests/difftest.sh /path/to/konica-corpus-full
+tests/difftest.sh /path/to/konica-corpus-full
 ```
 
-Expected today: `check-reader` PASS 27/27; `difftest` **PASS 60 / FAIL 0** (with
-`KONICA_LUT`); without it, the historical PASS 7 subset.
+Expected today: `check-reader` PASS 27/27; `check-lutgen` PASS; `difftest`
+**PASS 60 / FAIL 0** — with the table regenerated from the profiles, no `KONICA_LUT`
+needed. Without readable profiles it falls back to the historical PASS 7 subset.
 
 ## Disposable Alpine test rootfs (no Docker/Podman)
 
