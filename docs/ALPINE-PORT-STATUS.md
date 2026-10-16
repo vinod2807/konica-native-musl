@@ -159,6 +159,27 @@ The host chain is `pdftopdf → gstoraster → konica-native → usb` (Ubuntu's 
 this PPD; Alpine needed poppler's `pdftoraster`). The temporary queue and the installed filter
 are reversible — see `docs/ALPINE.md` "Rollback".
 
+### 3.6 Printing from the Alpine/musl chroot (2026-10-16)
+
+There is no separate Alpine box in this setup, but the Alpine chroot shares the host's `/dev`, so a
+**musl `cupsd` inside the chroot** can drive the USB printer directly. This closes the runbook's
+last gap ("a print from the Alpine machine itself"). A `cupsd` isolated on `127.0.0.1:8631` (host
+CUPS on `:631` untouched) with a queue on the printer's USB URI printed the step-5 rows from the
+**musl** filter at `/usr/local/lib/konica/konica-native`; every job ended `Job completed` with each
+filter `exited with no errors`:
+
+| Row | Job | Stream sent |
+|---|---|---|
+| text, A4 simplex | 11 | 103 538 B |
+| photo, A4 simplex | 12 | 70 701 B |
+| twopage, long-edge duplex | 13 | 172 325 B |
+| twopage, short-edge duplex | 14 | 174 151 B |
+| text, `lp -n 2` (`*cupsManualCopies: True`) | 15 | 206 936 B (~2×) |
+
+The chain is `pdftopdf → pdftoraster → konica-native → usb` (Alpine uses poppler's `pdftoraster`).
+The byte counts differ from §3.5 because the rasterizer differs (Ghostscript vs poppler) — the
+filter is deterministic *given the raster*. `tools/step5-chroot-print.sh` reproduces this.
+
 ## 4. Portability fixes made
 
 One source change, to make the strict build clean (no behaviour change):
@@ -296,10 +317,12 @@ rather than divergent; see `docs/REVERSE-ENGINEERING.md` §9.2.
    table in `enc_open()`, *before* the first PJL byte is written, so an unreadable profile is a
    hard error with no partial output on stdout rather than a silent downgrade; the historical
    flat-tone approximation survives only behind the explicit `KONICA_FLAT_TONE=1` escape hatch.
-2. **DONE for the chain; DONE for hardware on the host.** The CUPS chain on Alpine is verified
-   without a printer (§3.4), and the first real prints on the Ubuntu host all came out correct
-   (§3.5): text, photo, both duplex bindings and `lp -n 2` copies. One PPD-level finding: the
-   generated PPD must say `*cupsManualCopies: True` or `lp -n 2` prints a single copy.
+2. **DONE for the chain; DONE for hardware on the host and from Alpine.** The CUPS chain on Alpine
+   is verified without a printer (§3.4), the first real prints on the Ubuntu host all came out
+   correct (§3.5), and the same rows print from the Alpine/musl chroot itself (§3.6,
+   `tools/step5-chroot-print.sh`): text, photo, both duplex bindings and `lp -n 2` copies. One
+   PPD-level finding: the generated PPD must say `*cupsManualCopies: True` or `lp -n 2` prints a
+   single copy.
 3. **DONE (was NOT RUN):** the Alpine/musl re-verification. A fresh `alpine-minirootfs` chroot
    (Alpine 3.24.2, musl 1.2.5) at commit `da1070d` reproduced every host result — musl-only
    binary, `make check` 62 PASS / 0 FAIL, `difftest` 60/60, `check-lutgen` byte-identical, and

@@ -7,7 +7,8 @@ baseline and test results.
 > Status: the **build and offline tests** are verified, the **CUPS raster chain is tested on
 > Alpine without a printer** (step 4 below, `tools/step4-cups-chain.sh`), and the **first real
 > prints** (text, photo, both duplex bindings, copies) came out correct on the host
-> (`docs/ALPINE-PORT-STATUS.md` §3.5).
+> (`docs/ALPINE-PORT-STATUS.md` §3.5) **and from the Alpine/musl chroot itself** (§3.6,
+> `tools/step5-chroot-print.sh`).
 
 ## Dependencies
 
@@ -166,6 +167,19 @@ produces **one copy** for `lp -n 2` (verified with a real `cupsd` on Alpine: `lp
 to the generated PPD makes CUPS duplicate the pages itself: `lp -n 2` then yields two pages in
 one job (206 936 bytes), and `konica-native` stays **byte-identical to the vendor** on that
 two-page raster. This is a PPD change, not a filter change.
+
+### Print from the box itself
+
+If the printer is attached to the machine running this Alpine — a real install, or a **chroot that
+shares the host's `/dev`** — `tools/step5-chroot-print.sh file.pdf` drives the real USB device. It
+starts an isolated `cupsd` on `127.0.0.1:8631` (the machine's own CUPS on `:631` is untouched),
+creates a temporary queue on the printer's USB URI, prints the given PDF(s), reports the bytes
+sent, then stops `cupsd` and deletes the queue (backing up and restoring `/etc/cups/cupsd.conf`).
+
+It was first run from an Alpine chroot on the Ubuntu host: the **musl** filter printed text, photo,
+both duplex bindings and `lp -n 2` copies, every job `Job completed` (`docs/ALPINE-PORT-STATUS.md`
+§3.6). Note the byte counts differ from the host's `gstoraster` chain because Alpine uses poppler's
+`pdftoraster` — the filter is deterministic *given the raster*.
 
 ## Rollback
 

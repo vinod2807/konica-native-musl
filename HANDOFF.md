@@ -158,6 +158,7 @@ screen and ICC profiles, and skips cleanly without them. `make check` additional
 | `tools/verify-on-target.sh` (14 real rasters) | 14 / 14 | 14 / 14 |
 | CUPS chain (`pdftopdf`→`pdftoraster`→filter, isolated `cupsd`, no printer) | pass (2026-10-16) | pass (2026-10-16) |
 | Real prints (text, photo, duplex ×2, copies) on the host | pass (2026-10-16) | not applicable |
+| Real prints from the Alpine/musl chroot (§3.6) | pass (2026-10-16) | pass (2026-10-16) |
 | `make check-determinism` (corpus, `MALLOC_PERTURB_`) | pass | not re-run |
 
 Everything vendor-free at once: `make check`. The Alpine column is the **2026-10-16** measurement
@@ -683,8 +684,9 @@ Honest statement of scope:
 4. **CUPS installation and printing** are verified. The chain, native PPD and fail-safe were
    tested on Alpine without a printer (§3.4 of `docs/ALPINE-PORT-STATUS.md`), and the first
    real prints on the host all came out correct — text, photo, both duplex bindings and
-   `lp -n 2` copies (§3.5). One PPD-level finding: the generated PPD must say
-   `*cupsManualCopies: True`, or `lp -n 2` prints a single copy.
+   `lp -n 2` copies (§3.5). The same rows also print from the Alpine/musl chroot itself, driving
+   the USB printer through an isolated `cupsd` (§3.6, `tools/step5-chroot-print.sh`). One PPD-level
+   finding: the generated PPD must say `*cupsManualCopies: True`, or `lp -n 2` prints a single copy.
 5. **Two places where the vendor reads uninitialised heap** are deliberately not reproduced,
    because no deterministic filter can: (a) the 0–3 BIE pad bytes after the final SDNORM
    (§7.6); (b) when a raster row is not a multiple of 4 bytes, the byte just past the row,
