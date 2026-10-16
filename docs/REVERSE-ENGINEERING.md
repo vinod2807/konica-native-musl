@@ -397,6 +397,15 @@ drawn in the raster lands on the same pixels. So the tone rule below applies to 
 Implemented as a separate branch of `enc_page()` in `src/encode.c`. The corpus is all 8bpp;
 the differential fuzzer (`tests/fuzz-difftest.sh`) found this on 2026-10-16.
 
+The copy holds while no raster row carries ink in the two bits at or just past the image width
+(`x == Xd` or `x == Xd + 1`; needs a raster wider than the image). When one does, the vendor
+degenerates into an unexplained deterministic halftone-like pattern for the rest of the page —
+one bit turns a blank A5 page into 2 358 322 (at `(3499, 0)`) or 11 014 590 (at `(3500, 0)`)
+ink pixels; clearing that bit restores an exact copy. Unchanged under `MALLOC_PERTURB_`, so it
+is a defect in the vendor's own buffering, not a fresh-allocation artefact. The kit stays a
+copy; the fuzzer classifies such a case as a known vendor defect. It cannot arise here anyway:
+the PPD declares `cupsBitsPerColor 8`, so CUPS only sends 8-bit rasters.
+
 ### 6.1 The screen file format — SOLVED
 
 `COPA.DEFAULT.600x600.hft` structure:

@@ -177,6 +177,21 @@ rectangle drawn in the raster lands on the same pixels. `src/encode.c` has a sep
 this; the corpus is all 8bpp, so only the differential fuzzer (`tests/fuzz-difftest.sh`)
 exercised it.
 
+The copy is exact **while no raster row carries ink in the two bits at or just past the image
+width** (`x == Xd` or `x == Xd + 1`, which needs a raster wider than the image). When a row
+does, the vendor stops copying and emits an unexplained, *deterministic*, halftone-like pattern
+for the rest of the page: a single such bit turns a blank page into 14 %-64 % ink, spread over
+thousands of rows and decaying with `y`; a single full-ink row reaches 93 %. Measured on A5
+(`Xd` 3499): a blank raster with one bit at `(3499, 0)` gives 2 358 322 ink pixels, at
+`(3500, 0)` 11 014 590, at `(3499, 100)` 9 161 628; the same bit at `(3498, 0)` gives the
+expected 1, and bits at `(3501..3503, 0)` are ignored. Clearing `x = 3499` from an otherwise
+all-ink row restores an exact copy. The pattern
+is the same under `MALLOC_PERTURB_` 0/85/170, so it is not a fresh-allocation artefact but a
+defect in the vendor's own buffering; the kit stays a straight copy. This cannot arise for this
+device: the PPD declares `cupsBitsPerColor 8`, so CUPS only ever sends 8-bit rasters. The
+fuzzer reports a divergent 1bpp case with a raster wider than the image as a known vendor
+defect (`known_1bpp_defect()` in `tests/fuzz-difftest.sh`) rather than as a divergence.
+
 * The screen file is `Halftones/COPA.DEFAULT.600x600.hft`. It is a small header plus
   five planes; **plane 0** is the 96×96 threshold array the 600×600 path uses
   (values 1..255). (`1200x600.hft` has a 192×96 plane 0.)

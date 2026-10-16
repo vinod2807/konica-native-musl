@@ -338,7 +338,14 @@ int enc_page(sink_t *s, job_t *j, enc_res_t *res, const ras_hdr_t *h, ras_t *r)
          * one yields none, a checker yields half, and a rectangle drawn in the raster lands on
          * the same pixels (docs/REVERSE-ENGINEERING.md).  The raster's colour space makes no
          * difference (cs=0 and cs=3 behave identically).  The corpus is all 8bpp, which is
-         * how this went unnoticed until the fuzzer exercised 1bpp. */
+         * how this went unnoticed until the fuzzer exercised 1bpp.
+         *
+         * Verified limit: the copy is exact while no row carries ink in the two bits at or
+         * just past the image width (x == xd or xd+1, i.e. only possible when the raster is
+         * wider than the image).  When one does, the vendor abandons the copy and emits an
+         * unexplained deterministic halftone-like pattern; that is a vendor defect (see
+         * docs/DEVICE-STREAM.md section 3), the fuzzer reports it as such, and this PPD
+         * (cupsBitsPerColor 8) never produces 1bpp anyway. */
         for (uint32_t y = 0; y < yd; y++) {
             unsigned n;
             if (ras_read_line(r, line) != 1) break;

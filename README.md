@@ -34,7 +34,7 @@ make
 make check                # reader, CMM table, geometry, MEDIATYPE, hardening — no vendor needed
 make check-reader         # reader vs libcups: 27/27
 make check-lutgen         # regenerated CMM table vs the vendor's
-make check-geometry       # points -> size -> pixels, CUSTOM bounds, forced 600 dpi
+make check-geometry       # points -> PAPER code + pixels, CUSTOM bounds, forced 600 dpi
 make check-mediatype      # PJL MEDIATYPE table (golden, vendor-free)
 make check-errors         # a broken runtime install must fail with nothing on stdout
 make check-determinism    # CORPUS=...: same raster twice, once with MALLOC_PERTURB_
@@ -56,9 +56,12 @@ The fuzzer generates rasters that vary along the axes where defects actually liv
 version, page size in points vs the page-size *name*, dpi, bit depth, pages of mixed
 geometry — and diffs both filters. It found the orientation-dependent `DUPLEX`/`BINDING`
 rule (which the vendor resolves once per job, from page 1), the 1bpp pass-through, and the
-point→pixel conversion for sizes outside the table. A case whose *vendor* output moves under
-`MALLOC_PERTURB_` is reported as vendor-nondeterministic instead of divergent: the vendor
-reads uninitialised heap there, so no deterministic filter can match it.
+point→pixel conversion for sizes outside the table. Two kinds of case are reported separately
+rather than as divergences, because no deterministic filter can match the vendor there: a case
+whose *vendor* output moves under `MALLOC_PERTURB_` (the vendor reads uninitialised heap), and
+a 1bpp raster wider than the image with ink in the two bits at or just past the image width
+(a vendor defect — the vendor abandons the copy and emits an unexplained pattern). Neither can
+arise with this device: its PPD declares `cupsBitsPerColor 8`.
 
 ## Runtime data
 

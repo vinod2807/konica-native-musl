@@ -392,7 +392,10 @@ dot(x, y) = ( tone[x] >= screen[page_row % H][x % W] )     # unsigned compare
   colour space ignored (`cs=0` and `cs=3` behave identically). Measured on A6 (`Xd` 2475,
   `Yd` 3499): all-ink → 2475×3499 ink pixels, all-white → none, checker → half. `src/encode.c`
   branches on `bits_per_pixel == 1` before the CMM; the corpus is all 8bpp, so the fuzzer is
-  what exercised this.
+  what exercised this. The copy is exact while no row has ink in the two bits at or just past
+  the image width (`x == Xd` / `Xd + 1`); when one does, the vendor degenerates into an
+  unexplained deterministic halftone-like pattern (see `docs/DEVICE-STREAM.md` §3). The kit
+  stays a copy and the fuzzer calls that a known vendor defect; this PPD is 8-bit anyway.
 * screen `H=W=96`, from **plane 0** of `COPA.DEFAULT.600x600.hft`
   (`.hft` = `tHsG` magic, version 5, record at `0x0c` → offset `0x44`, sub-header
   `{u16 w, u16 h}` at `0x48`, data at `0x4c`; 9216 bytes, values 1…255, none zero);

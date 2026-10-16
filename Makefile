@@ -40,6 +40,11 @@ check-geometry: konica-native
 check-mediatype: konica-native
 	sh tests/check-mediatype.sh
 
+# Diagnostic-only JBIG1 decoder (links the system libjbig; the kit itself never needs it).
+# Used to compare what two filters *decoded* to, e.g. in one-off fuzzer investigations.
+tools/biedec: tools/biedec.c
+	$(CC) -O2 -Wall -o $@ $< -ljbig
+
 # Runtime-data hardening: a broken install must fail cleanly with nothing on stdout.
 check-errors: konica-native
 	sh tests/check-errors.sh
@@ -75,7 +80,7 @@ check-asan: tests/libcups_dump
 	ASAN_OPTIONS=verify_asan_link_order=0 NATIVE=$(CURDIR)/konica-native-asan sh tests/check-reader.sh
 
 clean:
-	rm -f konica-native konica-native-asan tests/libcups_dump tools/lutgen-dump
+	rm -f konica-native konica-native-asan tests/libcups_dump tools/lutgen-dump tools/biedec
 
 .PHONY: all check check-reader check-lutgen check-geometry check-mediatype \
         check-errors check-difftest check-determinism check-real check-fuzz \
