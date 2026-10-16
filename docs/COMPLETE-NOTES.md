@@ -372,8 +372,13 @@ transcribed from the corpus into `papers[]` in `src/encode.c`:
 | `Statement` | `INVOICE` | 3300 | 5100 | 3300 | 5100 |
 | `Tabloid` | `LEDGER` | 6600 | 10200 | 6600 | 10200 |
 
-`page_size_name` is read from the raster header. `PAPERWIDTH` always equals the raster
-width. When the page size is unknown, the code falls back to `width-1` / `height-1`.
+The page size is selected from the raster header's `PageSize` **in points** (that is what the
+vendor keys on), falling back to `page_size_name` and then to the raster's pixel dimensions.
+The points are what matters in practice: a real `pdftoraster` A4 page is 4961×7016 and calls
+itself `A4.Borderless`, which is not a PPD name at all, yet it must select the A4 row. For an
+unknown size the code falls back to `width` / `height-1` / `width-1` / `height-1`.
+`RESOLUTION=600` is hard-coded: the vendor ignores the raster's `HWResolution`.
+`tests/check-geometry.sh` pins the lookup order and the forced resolution.
 
 > Worked example for A4: raster 4958×7017 → image 4957×7016, BIH
 > `00 00 01 00 · 00 00 13 5d · 00 00 1b 68 · 00 00 00 80 · 00 00 03 48`.
@@ -785,8 +790,9 @@ single-precision arithmetic are documented in [`LUT-GENERATOR.md`](LUT-GENERATOR
 * `make check-lutgen` (`tests/check-lutgen.sh`) asserts exactly that;
 * `KONICA_LUT=/path/to/lut33.bin` remains an optional override/cross-check, and
   `tools/dump-lut.gdb` still reproduces the vendor's own table ([§16.2](#162-dumping-the-33³-lut));
-* if either profile cannot be read, `src/encode.c` falls back to the flat-tone approximation
-  (the historical 7/60 subset) and prints the reason once.
+* if either profile cannot be read, `enc_open()` fails before the first byte is written and
+  the filter exits non-zero with an empty stdout (the historical flat-tone approximation is
+  available only via `KONICA_FLAT_TONE=1`).
 
 Input profile paths are overridable via `KONICA_SRGB` / `KONICA_GRAY`.
 

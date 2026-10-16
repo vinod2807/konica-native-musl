@@ -51,13 +51,23 @@ Mapping (from `manifest.tsv` + captures):
 | `Duplex=DuplexTumble` (short edge) | `DUPLEX=ON` + `BINDING=LONGEDGE` |
 | `Duplex=None` | `DUPLEX=OFF` (no BINDING line) |
 | `PageSize` | `PAPER=<code>` (see table) |
-| `Resolution` | `RESOLUTION=<dpi>` |
+| *(raster HWResolution is ignored)* | `RESOLUTION=600` always |
 | `MediaType=Plain` | `MEDIATYPE=PLAIN`, `MEDIASOURCE=AUTO` |
 
-`PAPERWIDTH`/`PAPERLENGTH` are the PPD page geometry at the print resolution
-(`floor(points * dpi / 72)`), and the PJL paper *code* is a Konica-internal name
-(`A4`, `A3`, `MLTM16K`, `JISB4`, `C63OF4`, `COM10`, `FLS3`, …). The exact per-size
-values used by the 600 dpi path are tabulated in `src/encode.c` (`papers[]`).
+`RESOLUTION` is **not** derived from the raster: rewriting a raster's `HWResolution` to 300
+or 1200 dpi still yields a byte-identical stream with `RESOLUTION=600`, because the device is
+600 dpi. The kit emits 600 unconditionally (and warns on stderr if the raster disagrees).
+
+`PAPERWIDTH`/`PAPERLENGTH` and the image crop are **keyed on the raster header's `PageSize`
+in points**, not on the `PageSize=` option, not on `PageSizeName` and not on the raster's
+pixel dimensions (verified by rewriting those fields one at a time and re-running the vendor
+filter). This is why a real `pdftoraster` A4 page — 4961×7016 pixels, self-described as
+`A4.Borderless`, a name absent from the PPD — still yields the A4 entry: `4958/7016` with a
+`4957×7016` image, exactly as the corpus A4 raster (4958×7017, name `A4`) does. The lookup
+order is points → `PageSizeName` → pixel dimensions; `tests/check-geometry.sh` pins all three.
+The per-size values used by the 600 dpi path are tabulated in `src/encode.c` (`papers[]`,
+keyed by `px`/`py` points). `PAPER=<code>` is a Konica-internal name (`A4`, `A3`, `MLTM16K`,
+`JISB4`, `C63OF4`, `COM10`, `FLS3`, …).
 
 `OCM_TonerSave` never appears in the envelope; it only changes page pixels. The
 corpus confirms that **absent behaves as TRUE** (identical stream to `OCM_TonerSave=TRUE`).
@@ -97,9 +107,21 @@ persists across stripes. Two behaviours are essential for byte-exactness:
 
 * the coder must **not** strip trailing zero bytes from a stripe before `FF 02`
   (jbigkit's `jbg_buf_remove_zeros` must be disabled), and
-* the finished **BIE is zero-padded to a multiple of 4 bytes**.
+* the finished **BIE is padded to a multiple of 4 bytes**.
 
-`src/jbig.c` reimplements this from the T.82 tables. It reproduces all 60 corpus BIEs
+The padding bytes are the one place where the kit knowingly differs from the vendor. They
+follow the last `FF 02` and the device never decodes them, and the vendor does not write a
+defined value: it pads from the uninitialised tail of a freshly `malloc()`ed per-page buffer.
+On a real 2-page document whose page streams are 77476 and 44036 bytes — both under glibc's
+128 KiB `mmap` threshold — page 2's allocation reused the block freed after page 1, so its pad
+bytes were page 1's bytes at the same offsets (`42 be`); in corpus cases 029/031/033 the page
+streams are ≥ 128 KiB, which glibc serves with `mmap` (freshly zeroed), and the vendor's pad
+bytes were `00 00` even though stale bytes were available. Emulating the allocator is not
+portable, so `src/jbig.c` writes deterministic zeros. A byte-exact diff of a real document
+should mask the trailing `len % 4 ? 4 - len % 4 : 0` bytes of any page whose stream is not
+already 4-aligned.
+
+`src/jbig.c` reimplements the coder from the T.82 tables. It reproduces all 60 corpus BIEs
 byte-for-byte when fed the vendor's own 1-bit image (`tests/difftest.sh`).
 
 ## 3. Halftone (8-bit raster → 1-bit image)
@@ -144,5 +166,13 @@ byte-exact.
 Against `konica-corpus-full`: **60/60 byte-exact** (glibc and Alpine/musl), with the 33³
 table regenerated from the profiles at startup — no captured dump needed. The framing, the
 ACMM stage, the screen and the JBIG coder are each verified in isolation as well as
-end-to-end. `KONICA_LUT` can force a captured dump instead; if the profiles cannot be read
-the kit falls back to the flat-tone approximation and reproduces the historical 7/60 subset.
+end-to-end. `KONICA_LUT` can force a captured dump instead.
+
+The corpus is all v2/RLE rasters built from the PPD, so it exercises neither real
+`pdftoraster` headers (v3, `A4.Borderless`, 4961×7016) nor BIE padding: every one of its 60
+page streams is already a multiple of 4 bytes. Real-document runs found both gaps — see
+`docs/ALPINE-PORT-STATUS.md` §7.2 and `tests/check-geometry.sh`.
+
+Runtime data (screen + ICC profiles) is loaded in `enc_open()` before the first byte reaches
+stdout. If it cannot be read the filter exits non-zero with **nothing on stdout**; the old
+flat-tone approximation is available only via `KONICA_FLAT_TONE=1`.

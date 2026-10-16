@@ -85,17 +85,25 @@ int main(int argc, char **argv)
     if (!r) { fprintf(stderr, "ERROR: input is not a CUPS raster stream\n"); return 1; }
 
     job_t job; parse_job(&job, argv[5]);
+
+    /* Load the runtime data before the first byte of the job is written, so a missing
+     * screen or colour table fails the job cleanly instead of emitting a truncated PJL
+     * header (which can leave the printer stuck in "data receiving"). */
+    enc_res_t *res = enc_open();
+    if (!res) return 1;
+
     sink_t out = { stdout, 0 };
-    if (enc_job_begin(&out, &job)) return 1;
+    if (enc_job_begin(&out, &job)) { enc_close(res); return 1; }
 
     ras_hdr_t h;
     int rc;
     while ((rc = ras_next_page(r, &h)) == 1)
-        if (enc_page(&out, &job, &h, r)) return 1;
-    if (rc < 0) { fprintf(stderr, "ERROR: bad page header\n"); return 1; }
+        if (enc_page(&out, &job, res, &h, r)) { enc_close(res); return 1; }
+    if (rc < 0) { fprintf(stderr, "ERROR: bad page header\n"); enc_close(res); return 1; }
 
-    if (enc_job_end(&out, &job)) return 1;
+    if (enc_job_end(&out, &job)) { enc_close(res); return 1; }
     fflush(stdout);
     ras_close(r);
+    enc_close(res);
     return 0;
 }

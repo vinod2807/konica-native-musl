@@ -53,15 +53,18 @@ make CC=cc CFLAGS='-O2 -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow'
 Runtime data: the filter loads a halftone screen at runtime. Default path is the vendor
 install (`/usr/local/lib/konica/KonicaMinolta/245igdi/Halftones/COPA.DEFAULT.600x600.hft`);
 override with the `KONICA_HFT` environment variable. If the screen is missing the filter
-errors out and produces a 119-byte stub.
+exits non-zero and writes **nothing** to stdout.
 
 The whole-page colour transform needs the vendor's 33³ ACMM lookup table. The vendor
 *computes* it at run time from the installed ICC profiles, and the kit regenerates the same
 table from them (`src/lutgen.c`), so **no dump is required**. The profiles default to the
 vendor install (`.../245igdi/Profiles/{sRGB,sGrayInv}.icm`); override with `KONICA_SRGB`
 and `KONICA_GRAY`. A captured dump can still be forced with `KONICA_LUT=/path/to/lut33.bin`
-(`tools/dump-lut.gdb` reproduces it; see `docs/LUT-GENERATOR.md`). If the profiles cannot be
-read the filter still runs, with a flat-tone approximation.
+(`tools/dump-lut.gdb` reproduces it; see `docs/LUT-GENERATOR.md`).
+
+The screen and the table are both loaded before the first byte reaches stdout, so if the
+profiles cannot be read the filter exits non-zero with an empty stdout rather than emitting a
+half-correct job; the old flat-tone approximation is available only via `KONICA_FLAT_TONE=1`.
 
 ```sh
 # reader + writer cross-check vs libcups (needs cups-dev)
@@ -74,9 +77,10 @@ make check-lutgen
 tests/difftest.sh /path/to/konica-corpus-full
 ```
 
-Expected today: `check-reader` PASS 27/27; `check-lutgen` PASS; `difftest`
-**PASS 60 / FAIL 0** — with the table regenerated from the profiles, no `KONICA_LUT`
-needed. Without readable profiles it falls back to the historical PASS 7 subset.
+Expected today: `check-reader` PASS 27/27; `check-geometry` PASS 6/6; `check-lutgen` PASS;
+`difftest` **PASS 60 / FAIL 0** — with the table regenerated from the profiles, no `KONICA_LUT`
+needed. Without readable profiles the filter now stops with a hard error before writing a single
+byte (see `KONICA_FLAT_TONE=1` in `README.md` for the old approximation).
 
 ## Disposable Alpine test rootfs (no Docker/Podman)
 

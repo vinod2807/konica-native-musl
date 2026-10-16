@@ -722,8 +722,9 @@ nothing:
 * `tests/check-lutgen.sh` (a.k.a. `make check-lutgen`) checks exactly that;
 * `KONICA_LUT=/path/to/lut33.bin` remains an optional override and cross-check, and
   `tools/dump-lut.gdb` still reproduces the vendor's own table;
-* if either profile cannot be read, `src/encode.c` falls back to the flat-tone
-  approximation (⇒ the old 7/60 behaviour) and prints the reason once.
+* if either profile cannot be read, `enc_open()` fails before stdout is touched: one line on
+  stderr, a non-zero exit, and nothing on stdout (the old flat-tone approximation survives
+  only behind `KONICA_FLAT_TONE=1`).
 
 Input profile paths are overridable via `KONICA_SRGB` / `KONICA_GRAY`.
 

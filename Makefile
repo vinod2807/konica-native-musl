@@ -26,9 +26,13 @@ tools/lutgen-dump: tools/lutgen-dump.c src/lutgen.c src/lutgen.h
 check-lutgen: tools/lutgen-dump
 	sh tests/check-lutgen.sh
 
-check: check-reader check-lutgen
+# Geometry keying: points -> PageSizeName -> pixels, and the forced 600 dpi.
+check-geometry: konica-native
+	sh tests/check-geometry.sh
+
+check: check-reader check-lutgen check-geometry
 
 clean:
 	rm -f konica-native tests/libcups_dump tools/lutgen-dump
 
-.PHONY: all check check-reader check-lutgen clean
+.PHONY: all check check-reader check-lutgen check-geometry clean

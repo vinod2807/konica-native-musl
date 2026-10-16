@@ -196,7 +196,10 @@ int jbig_encode_bie(unsigned long xd, unsigned long yd, const uint8_t *img,
         qm_flush(&qm);
         bput(&b, MARKER_ESC); bput(&b, 0x02);   /* SDNORM stripe marker */
     }
-    while (b.len & 3) bput(&b, 0x00);           /* whole BIE padded to 4 bytes */
+    /* Whole BIE padded to 4 bytes.  The vendor writes uninitialised malloc()ed memory
+     * here (allocator-dependent, see the header comment), so we emit deterministic
+     * zeros: these bytes follow the last SDNORM and are never decoded. */
+    while (b.len & 3) bput(&b, 0x00);
 
     *out = b.d; *outlen = b.len;
     return 0;

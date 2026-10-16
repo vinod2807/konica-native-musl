@@ -9,6 +9,13 @@ The whole pipeline — page framing, page geometry, colour conversion, halftonin
 entropy coding — was reconstructed from disassembly and runtime captures, and is
 **byte-exact on all 60 cases** of the captured differential corpus.
 
+It is also byte-exact on real `pdftoraster` output: three real PDFs (1, 4 and 2 pages) were
+run through the vendor filter and through this kit and compared byte for byte. Two are
+identical; the third differs in exactly 2 bytes, which are the 4-byte alignment padding at
+the end of a bitmap — bytes the device never decodes, and which the vendor fills with
+uninitialised heap memory (see `docs/ALPINE-PORT-STATUS.md` §7.2). No printer was involved
+in any of this: both filters wrote to a file.
+
 * Pure C11, libc only — no third-party libraries, builds on glibc and musl/Alpine.
 * Self-contained: no GPL/third-party encoder is vendored (the JBIG1 QM coder is
   implemented from the ITU-T T.82 tables in `src/jbig.c`).
@@ -25,6 +32,7 @@ make
 
 ```sh
 make check-reader                                  # reader vs libcups: 27/27
+make check-geometry                                # geometry keying + forced 600 dpi: 6/6
 make check-lutgen                                  # regenerated CMM table vs the vendor's
 tests/difftest.sh /path/to/konica-corpus
 ```
@@ -32,6 +40,12 @@ tests/difftest.sh /path/to/konica-corpus
 The differential test reproduces the vendor filter's captured output byte-for-byte:
 `PASS: 60   FAIL: 0` (verified on glibc and on Alpine/musl). It needs no captured
 table: the colour-management table is regenerated from the installed ICC profiles.
+
+All of them at once:
+
+```sh
+make check
+```
 
 ## Runtime data
 
@@ -43,15 +57,18 @@ Two things are loaded at runtime rather than compiled in:
 | `KONICA_SRGB` | input matrix/shaper profile `sRGB.icm` | the vendor install path |
 | `KONICA_GRAY` | output grey profile `sGrayInv.icm` | the vendor install path |
 | `KONICA_LUT` | a captured 33³ table (optional override) | *unset* — the table is generated |
+| `KONICA_FLAT_TONE` | accept the old flat-tone approximation instead of failing | *unset* |
 
 The CMM table is not a file the vendor ships: its colour engine generates it from
 the two profiles at start-up, and `src/lutgen.c` reproduces that generator exactly
 (byte-identical on glibc and musl). `KONICA_LUT` remains as an explicit override and
 cross-check; `tools/dump-lut.gdb` captures the vendor's own table.
 
-If the profiles cannot be read, the filter still runs but falls back to the
-flat-tone approximation (the historical 7/60 subset), printing the reason once.
-See `docs/LUT-GENERATOR.md`.
+The screen and the table are both loaded in `enc_open()`, **before** the first byte is
+written to stdout. If either cannot be read the filter prints the reason and exits
+non-zero with **nothing on stdout**, so a broken install cannot produce a plausible-looking
+half-correct job. The historical flat-tone approximation is still available, but only
+explicitly, with `KONICA_FLAT_TONE=1`; see `docs/LUT-GENERATOR.md`.
 
 ## Layout
 

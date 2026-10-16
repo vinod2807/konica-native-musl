@@ -174,11 +174,12 @@ make check-reader                 # 27/27
 
 ## 7. Failure modes
 
-`acmm_generate()` returns NULL — and the caller falls back to the historical
-flat-tone approximation, printing a one-line reason — if either profile is
-missing, unreadable, oversized (> 8 MiB), not an ICC file (`acsp`), lacks `rTRC`
-or the colourant `XYZ ` tags, or carries a `kTRC` that is not monotonically
-decreasing. The profile paths are overridable:
+`acmm_generate()` returns NULL if either profile is missing, unreadable, oversized
+(> 8 MiB), not an ICC file (`acsp`), lacks `rTRC` or the colourant `XYZ ` tags, or
+carries a `kTRC` that is not monotonically decreasing. `enc_open()` calls it before
+the first PJL byte reaches stdout, so the failure is fatal: a one-line reason on
+stderr, a non-zero exit, and an empty stdout. The old flat-tone approximation is
+available only via `KONICA_FLAT_TONE=1`. The profile paths are overridable:
 
 | variable | default |
 |----------|---------|

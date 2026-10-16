@@ -36,8 +36,19 @@ installed ICC profiles. That generator has now been recovered in full and is rep
 `src/lutgen.c`; the regenerated table is **byte-identical** to the vendor's
 (`sha256 84a424f5…6d6f`). No vendor data is embedded anywhere in the kit.
 
+The kit has also been run on **real documents** (real PDFs → `pdftopdf` → `pdftoraster`,
+CUPS raster v3) beside the vendor filter, with both stdout streams captured to files — no
+printer involved. The first such run found two defects the synthetic corpus could not see: the
+geometry table was keyed on `PageSizeName`, but the vendor keys on the raster header's
+`PageSize` **in points** (real `pdftoraster` A4 calls itself `A4.Borderless`, a name absent
+from the PPD), and the vendor forces `RESOLUTION=600` whatever the raster says. Both are fixed
+and covered by `tests/check-geometry.sh`. Two of three real documents are now byte-identical;
+the third differs in 2 bytes of BIE alignment padding that the device never decodes and that
+the vendor fills with uninitialised heap memory ([§7.6](#76-jbig1-encoder-srcjbigc)).
+
 The project is **finished**. [§12](#12-known-limitations--what-is-not-verified) lists the
-only remaining uncertainties, all of them outside the tested corpus.
+only remaining uncertainties, all of them outside the tested corpus or outside the decoded
+image.
 
 ---
 
@@ -114,7 +125,17 @@ make clean && make CFLAGS='-O2 -std=c11 -Wall -Wextra -Wpedantic -Wconversion -W
 # → 0 warnings
 ```
 
-### 3.5 Verified result matrix
+### 3.5 Geometry keying
+
+```sh
+make check-geometry
+# → check-geometry: all cases pass     (6 cases)
+```
+
+Pins the points → `PageSizeName` → pixel-dimension lookup order and the forced 600 dpi. Needs
+the vendor halftone screen and ICC profiles, and skips cleanly without them.
+
+### 3.6 Verified result matrix
 
 | Check | glibc (x86-64) | Alpine 3.24.2 / musl 1.2.5 |
 |---|:---:|:---:|
@@ -123,6 +144,11 @@ make clean && make CFLAGS='-O2 -std=c11 -Wall -Wextra -Wpedantic -Wconversion -W
 | `tests/difftest.sh` (LUT regenerated, no `KONICA_LUT`) | **60 / 60** | **60 / 60** |
 | `make check-lutgen` | PASS | PASS |
 | `make check-reader` | 27 / 27 | 27 / 27 |
+| `make check-geometry` | 6 / 6 | not re-run (rootfs removed) |
+
+Everything at once: `make check`. The Alpine column is the 2026-10-15 measurement; the
+Alpine rootfs has since been removed from the authoring machine, and the changes made since
+add no dependency beyond C11 + POSIX.
 
 ---
 
@@ -261,9 +287,14 @@ Option mapping: `Duplex=DuplexNoTumble`→`ON`+`BINDING=SHORTEDGE`;
 
 ### 7.2 Page geometry (`papers[]` in `src/encode.c`)
 
-`PAPERWIDTH`/`PAPERLENGTH` are the PPD geometry at the print resolution, and the image is
-the raster cropped by one column and/or row depending on the paper. The full verified
-table (`PageSize` → PJL code → `pw, pl` → image `xd, yd`):
+The table is keyed on the raster header's **`PageSize` in points**, which is what the vendor
+actually uses: a real `pdftoraster` A4 page is 4961×7016 pixels and calls itself
+`A4.Borderless` (a name that is not in the PPD at all), and it still gets the A4 row. Points
+are tried first, `PageSizeName` second and the raster's pixel dimensions last;
+`tests/check-geometry.sh` pins all three levels. `PAPERWIDTH`/`PAPERLENGTH` are the PPD
+geometry at the (forced) 600 dpi, and the image is the raster cropped by one column and/or
+row depending on the paper. The full verified table (`PageSize` → PJL code → `pw, pl` →
+image `xd, yd`):
 
 | PageSize | PJL code | pw | pl | xd | yd |
 |---|---|---:|---:|---:|---:|
@@ -291,6 +322,16 @@ table (`PageSize` → PJL code → `pw, pl` → image `xd, yd`):
 | Letter | LETTER | 5100 | 6600 | 5100 | 6600 |
 | Statement | INVOICE | 3300 | 5100 | 3300 | 5100 |
 | Tabloid | LEDGER | 6600 | 10200 | 6600 | 10200 |
+
+Point keys (`px × py`), in table order: 16K 553×765 · 8K 757×1100 · A3 842×1191 · A4 595×842 ·
+A5 420×595 · A6 297×420 · B4 729×1032 · B5 516×729 · B6 363×516 · Comm10 297×684 ·
+EnvC6 323×459 · EnvDL 312×624 · EnvPersonal 261×468 · Executive 522×756 · FLS3 612×935 ·
+FLS4 624×935 · FLS5 584×955 · FLS2 595×935 · FLS6 612×972 · FLS1 575×935 · Legal 612×1008 ·
+Letter 612×792 · Statement 396×612 · Tabloid 792×1224. Every row was re-verified against the
+running vendor filter by rewriting the raster's `PageSize` field and diffing the output.
+
+`RESOLUTION=600` is hard-coded: the vendor ignores the raster's `HWResolution` (300 dpi and
+1200 dpi rasters give byte-identical streams). The kit warns on stderr if the raster disagrees.
 
 ### 7.3 The ACMM colour-world stage, Φ (`src/acmm.c`)
 
@@ -336,7 +377,8 @@ dot(x, y) = ( tone[x] >= screen[page_row % H][x % W] )     # unsigned compare
 * row phase is the **page row** (not the band row), column phase `x % 96`;
 * consistency check: 82.87 % of the screen cells are ≤ 245, which matches the measured
   82.86 % dot coverage of a solid (black) page — i.e. `Φ(0,0,0)=255 → tone=245`;
-* when the screen cannot be read the filter emits a 119-byte error stub.
+* when the screen cannot be read `enc_open()` fails and the filter exits non-zero with an
+  empty stdout — no partial job is ever emitted.
 
 ### 7.6 JBIG1 encoder (`src/jbig.c`)
 
@@ -357,8 +399,18 @@ dot(x, y) = ( tone[x] >= screen[page_row % H][x % W] )     # unsigned compare
   prediction, terminated with the stripe marker `FF 02` (SDNORM); the context probability
   state **persists across stripes**;
 * two behaviours are essential for byte-exactness: trailing zero bytes must **not** be
-  stripped before `FF 02`, and the finished BIE is **zero-padded to a multiple of 4**;
-* verified against jbigkit-2.2 as an oracle (never vendored) — identical BIE.
+  stripped before `FF 02`, and the finished BIE is **padded to a multiple of 4**;
+* the pad is the one place the kit knowingly diverges. The vendor fills those 0–3 bytes with
+  uninitialised `malloc()`ed memory: on a real 2-page A4 document (page streams 77 476 and
+  44 036 bytes — both under glibc's 128 KiB `mmap` threshold) page 2's pad bytes were `42 be`,
+  exactly page 1's bytes at offsets 44 034–44 035, because page 2's allocation reused the
+  block freed after page 1; in corpus cases 029/031/033 the streams are ≥ 128 KiB, which
+  glibc serves with `mmap` (freshly zeroed), and the vendor's pad bytes were `00 00`. The
+  bytes follow the last SDNORM and are never decoded, so `src/jbig.c` writes deterministic
+  zeros. A byte-exact diff of a real document should mask the trailing
+  `len % 4 ? 4 - len % 4 : 0` bytes of any page whose stream is not already 4-aligned;
+* verified against jbigkit-2.1 as an oracle (never vendored) for the coder itself; the
+  end-of-image bytes are compared against the vendor, since jbigkit's stream ends differently.
 
 Measured page-image sizes: blank A4 = **132 bytes**, solid A4 = **132 452 bytes**
 (the whole `.prn` is 518 / 132 939 bytes once PJL framing and `IMAGELEN` chunk headers are
@@ -462,10 +514,12 @@ excess precision is assumed.
 
 ### 8.5 Failure modes and configuration
 
-`acmm_generate()` returns `NULL` (and the caller falls back to the historical flat-tone
-approximation, printing one line to stderr) if either profile is missing, unreadable,
-oversized (> 8 MiB), not an ICC file (`acsp` magic), lacks `rTRC` or the colourant `XYZ `
-tags, carries a non-decreasing `kTRC`, or yields a degenerate (zero-sum) matrix.
+`acmm_generate()` returns `NULL` if either profile is missing, unreadable, oversized
+(> 8 MiB), not an ICC file (`acsp` magic), lacks `rTRC` or the colourant `XYZ ` tags, carries
+a non-decreasing `kTRC`, or yields a degenerate (zero-sum) matrix. `enc_open()` calls it
+*before* the first PJL byte is written, so such a failure is fatal: the filter prints one line
+to stderr and exits non-zero with **nothing on stdout**. The historical flat-tone
+approximation is reachable only through the explicit `KONICA_FLAT_TONE=1` escape hatch.
 
 | Variable | Meaning | Default |
 |---|---|---|
@@ -555,6 +609,19 @@ Environment gotchas that cost time:
 `036` is the only resolution case (600×600 dpi). The corpus exercises **8-bit grey** raster
 only; the *reader* is additionally cross-checked on 1-bit grey and RGB/CMYK.
 
+Two gaps in the corpus that real documents exposed (both now covered by tests, see §7.2, §7.6
+and `docs/ALPINE-PORT-STATUS.md` §7.2):
+
+* every case was built from the PPD with `cupsRasterInterpretPPD()`, so `PageSizeName` is
+  always a real PPD value and the pixel width is the corpus width (4958 for A4). Real
+  `pdftoraster` output is v3, 4961×7016 and self-described as `A4.Borderless`. A
+  `PageSizeName`-keyed table therefore passed 60/60 while being wrong on every real page;
+* every page stream in the corpus happens to be a multiple of 4 bytes, so the vendor's BIE
+  padding behaviour was never exercised.
+
+`tests/check-geometry.sh` now covers the first gap directly. The second is documented rather
+than reproduced (it is uninitialised memory; see §7.6).
+
 ---
 
 ## 12. Known limitations / what is *not* verified
@@ -565,15 +632,19 @@ Honest statement of scope:
    by the model but not exercised end-to-end. The filter path converts only 8-bit and 1-bit
    grey (`to_gray`); the corpus exercises 8-bit grey only.
 2. **Non-600 dpi** resolutions are not exercised (`1200x600.hft` exists and has a 192×96
-   plane 0, but only the 600×600 path is tested).
+   plane 0, but only the 600×600 path is tested). The vendor forces `RESOLUTION=600` whatever
+   the raster says (verified), so this is a fidelity limit of the device path, not of the kit.
 3. **The LUT generator is verified against the vendor's own installed profiles.** A different
    profile pair would legitimately produce a different table; `make check-lutgen` covers the
    vendor set.
 4. **CUPS/printer installation** is not attempted — the kit is a stream generator, tested
    offline. `docs/ALPINE.md` describes the install/rollback plan but marks it untested.
+5. **The 0–3 BIE pad bytes** after the final SDNORM are not reproduced (the vendor writes
+   uninitialised heap there; see §7.6). They are outside the decoded image. This is the only
+   known byte-level difference from the vendor on a real document.
 
 There are **no known correctness gaps** inside the tested scope: every byte of every corpus
-stream is reproduced.
+stream is reproduced, and 2 of the 3 real documents are byte-identical end-to-end.
 
 ---
 

@@ -163,21 +163,77 @@ the corpus was not modified.
 | Check | Host (glibc) | Alpine (musl) |
 |---|---|---|
 | Default build | PASS | PASS |
-| Strict build | PASS (clean) | PASS (clean) |
+| Strict build (`-Wconversion -Wshadow`) | PASS (clean) | PASS (clean) |
 | `check-reader.sh` | PASS 27/27 | PASS 27/27 |
-| `difftest.sh` (60 cases) | **PASS 7 / FAIL 53** | **PASS 7 / FAIL 53** |
+| `check-lutgen` (33³ CMM table) | PASS — byte-identical to the vendor's, sha256 `84a424f5…c6d6f` | PASS |
+| `check-geometry.sh` | PASS 6/6 | not re-run in this pass |
+| `difftest.sh` (60 cases) | **PASS 60 / FAIL 0** | **PASS 60 / FAIL 0** |
+| Real documents vs the vendor filter | 2/3 byte-identical; the third differs only in 2 pad bytes the device never decodes (§7.2) | not re-run in this pass |
 | Printer / CUPS integration | NOT RUN | NOT RUN |
 
-The 7 passing cases are `001-simplex-blank`, `002-simplex-solid`, `009/010/011/012-probe-dot_*`,
-`019-tex-hlines_16`. The 53 failures are all attributed to the un-reproduced nonlinear
-colour-conversion stage (ACMM `PCM_lfFilter8Eval3x1`); see `docs/REVERSE-ENGINEERING.md`
-§6 and §9. **The driver is not complete.**
+### 7.1 Corrections to earlier revisions of this file
+
+Sections 7 and 8 previously reported `difftest.sh` as **PASS 7 / FAIL 53** and listed the ACMM
+colour-world filter as BLOCKED. Both statements were stale leftovers from an earlier phase and
+are withdrawn:
+
+* the colour stage is **fully recovered**: `src/lutgen.c` regenerates the vendor's 33³ CMM
+  table byte-for-byte from the installed `sRGB.icm`/`sGrayInv.icm` profiles (`make check-lutgen`,
+  sha256 `84a424f5cccdbe7070b3f926fe9834b515db69391440ccac1dc5b046622c6d6f`), so there is no
+  flat-tone-only fallback on the normal path;
+* `difftest.sh` against the 60-case corpus is **60 PASS / 0 FAIL** on both glibc and musl;
+* the 7-vs-53 split predates the LUT generator landing (2026-10-15) and was never updated.
+
+### 7.2 Real-document verification (2026-10-16)
+
+Three real PDFs were rendered with the real CUPS chain (`pdftopdf` → `pdftoraster`, CUPS raster
+v3, 8-bit, `cs=0`) and fed to both the vendor's `245igdi/Filters/245igdirf` and this kit, with
+stdout captured to files — **nothing was ever sent to a printer**. This found two defects that
+the synthetic corpus cannot see, both now fixed:
+
+* **geometry keying.** The vendor derives `PAPERWIDTH`/`PAPERLENGTH` and the BIH `Xd`/`Yd` crop
+  from the raster header's `PageSize` **in points** — not from the `PageSize=` option, not from
+  `PageSizeName`, and not from the raster's pixel dimensions. A real `pdftoraster` A4 page is
+  4961×7016 pixels and calls itself `A4.Borderless`, a name that is absent from the PPD, so the
+  old name-keyed table fell through to the pixel-dimension fallback and emitted `4960/7015`
+  instead of the vendor's `4958/7016`. The table in `src/encode.c` is now keyed on points first,
+  with `PageSizeName` and then the pixel dimensions as fallbacks; `tests/check-geometry.sh` pins
+  all three levels.
+* **forced resolution.** The vendor reports the *device* resolution, not the raster's: rewriting
+  a raster's `HWResolution` to 300 or 1200 dpi still produces a byte-identical stream with
+  `@PJL SET RESOLUTION=600`. The kit now emits 600 unconditionally and warns on stderr if the
+  raster disagrees.
+
+Results after the fixes:
+
+| Document | Pages | Vendor vs kit |
+|---|---|---|
+| `WordCraft-test.pdf` | 1 | byte-identical (2439 B) |
+| `7.pdf` | 4 | byte-identical (456864 B) |
+| `ACF0E705EDF100D6FF0E523618376FA1-Tejaswini_CV.pdf` | 2 | identical except the final 2 bytes of page 2 |
+
+The single remaining difference is a **vendor defect that cannot be reproduced portably**: the
+4-byte padding at the end of a BIE follows the last SDNORM marker and is never decoded, and the
+vendor writes *uninitialised* `malloc()`ed memory there. Evidence: page 1's stream is 77476 bytes
+and page 2's 44036, both under glibc's 128 KiB `mmap` threshold, so page 2's allocation reuses the
+block freed after page 1 and its untouched tail held page 1's bytes — `42 be`, exactly page 1's
+bytes at offsets 44034–44035. Corpus cases 029/031/033 have page streams ≥ 128 KiB, which glibc
+serves with `mmap` (freshly zeroed pages), and there the vendor's pad bytes are `00 00` even
+though stale bytes were available. Reproducing that would mean emulating the C library's
+allocator, so the kit emits deterministic zeros; a byte-exact diff of a real document should mask
+the trailing `len % 4 ? 4 - len % 4 : 0` bytes of any page whose stream is not already 4-aligned.
 
 ## 8. Remaining blockers
 
-1. **BLOCKED (algorithmic):** the ACMM `PCM_lfFilter8Eval3x1` colour-world filter is
-   identified and its call chain confirmed, but its full branch logic and table construction
-   are not yet recovered, so `src/halftone.c` reproduces only flat tones. Next step in
-   `docs/REVERSE-ENGINEERING.md` §9.
-2. **NOT RUN:** CUPS integration on Alpine (Phase 5) and hardware testing (needs explicit
-   user approval; nothing has been sent to a printer).
+1. **FIXED (was blocked):** the ACMM colour-world stage. The 33³ CMM table is regenerated
+   byte-for-byte from the shipped ICC profiles (`make check-lutgen`), so the flat-tone path is no
+   longer used on the normal path. `src/encode.c` now loads the halftone screen and the colour
+   table in `enc_open()`, *before* the first PJL byte is written, so an unreadable profile is a
+   hard error with no partial output on stdout rather than a silent downgrade; the historical
+   flat-tone approximation survives only behind the explicit `KONICA_FLAT_TONE=1` escape hatch.
+2. **NOT RUN:** CUPS integration on Alpine (Phase 5) and hardware testing (needs explicit user
+   approval; nothing has been sent to a printer).
+3. **NOT RUN in this pass:** the Alpine/musl re-verification. The Alpine rootfs used in §3.2 was
+   removed from this machine, so the 60/60 and 27/27 numbers above remain the 2026-10-15
+   measurements; the source is unchanged in any way that affects portability (the new code uses
+   nothing beyond C11 + POSIX).
