@@ -4,9 +4,10 @@ How to build and test `konica-native` natively on Alpine/musl. Verified on **Alp
 3.24.2 (x86_64, musl)** with gcc 15.2.0. See `docs/ALPINE-PORT-STATUS.md` for the exact
 baseline and test results.
 
-> Status: the **build and offline tests** are verified, and the **CUPS raster chain is now
-> tested on Alpine without a printer** (step 4 below, `tools/step4-cups-chain.sh`). Only the
-> final prints are still outstanding — they need the printer.
+> Status: the **build and offline tests** are verified, the **CUPS raster chain is tested on
+> Alpine without a printer** (step 4 below, `tools/step4-cups-chain.sh`), and the **first real
+> prints** (text, photo, both duplex bindings, copies) came out correct on the host
+> (`docs/ALPINE-PORT-STATUS.md` §3.5).
 
 ## Dependencies
 

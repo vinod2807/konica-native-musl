@@ -140,6 +140,25 @@ capture backend. Nothing was sent to a printer. `tools/step4-cups-chain.sh` auto
   206 936 bytes, two pages, one job), and `konica-native` stays byte-identical to the vendor on
   that two-page raster. See `docs/ALPINE.md` "Copies need `*cupsManualCopies: True`".
 
+### 3.5 First real prints (Ubuntu host, 2026-10-16)
+
+With the printer attached to the Ubuntu host, a **temporary** queue `KONICA206_NATIVE_TEST`
+(`usb://KONICA%20MINOLTA/206?serial=A8A6041029423&interface=1`, the native PPD) printed the
+runbook's step-5 rows. Every job ended `Job completed` with each filter reporting
+`exited with no errors`:
+
+| Row | Job | Stream sent | Paper |
+|---|---|---|---|
+| text, A4 simplex | 230 | — | correct |
+| photo, A4 simplex | 231 | 73 221 B | correct |
+| twopage, long-edge duplex | 232 | 167 401 B | correct |
+| twopage, short-edge duplex | 233 | 169 007 B | correct |
+| text, `lp -n 2` (`*cupsManualCopies: True`) | 234 | 191 608 B (~2×) | two copies |
+
+The host chain is `pdftopdf → gstoraster → konica-native → usb` (Ubuntu's Ghostscript handles
+this PPD; Alpine needed poppler's `pdftoraster`). The temporary queue and the installed filter
+are reversible — see `docs/ALPINE.md` "Rollback".
+
 ## 4. Portability fixes made
 
 One source change, to make the strict build clean (no behaviour change):
@@ -194,7 +213,7 @@ the corpus was not modified.
 | `difftest.sh` (60 cases) | **PASS 60 / FAIL 0** | **PASS 60 / FAIL 0** (re-run 2026-10-16) |
 | Real documents vs the vendor filter | 2026-10-16 re-check: `WordCraft-test`, `7.pdf`, `problematic.pdf` byte-identical; CV pad-bytes-only; a real-photo page (A4 and Letter) byte-identical (§7.2) | **PASS 14 / FAIL 0** via `tools/verify-on-target.sh` on the same rasters (2026-10-16) |
 | CUPS chain (`pdftopdf`→`pdftoraster`→filter, incl. an isolated `cupsd`) | PASS — step 4 (2026-10-16) | PASS — step 4 (2026-10-16) |
-| Printer / hardware prints | NOT RUN | NOT RUN |
+| Printer / hardware prints | PASS — 5/5 rows, 2026-10-16 (§3.5) | not applicable (host printer) |
 
 ### 7.1 Corrections to earlier revisions of this file
 
@@ -277,11 +296,10 @@ rather than divergent; see `docs/REVERSE-ENGINEERING.md` §9.2.
    table in `enc_open()`, *before* the first PJL byte is written, so an unreadable profile is a
    hard error with no partial output on stdout rather than a silent downgrade; the historical
    flat-tone approximation survives only behind the explicit `KONICA_FLAT_TONE=1` escape hatch.
-2. **PARTLY DONE:** the CUPS chain on Alpine is now verified without a printer (§3.4): filters,
-   native PPD, fail-safe and an isolated `cupsd` all pass. What is still **NOT RUN** is hardware
-   printing (step 5), which needs the printer and explicit approval — nothing has been sent to a
-   printer. One PPD-level finding: the generated PPD must say `*cupsManualCopies: True` or
-   `lp -n 2` prints a single copy.
+2. **DONE for the chain; DONE for hardware on the host.** The CUPS chain on Alpine is verified
+   without a printer (§3.4), and the first real prints on the Ubuntu host all came out correct
+   (§3.5): text, photo, both duplex bindings and `lp -n 2` copies. One PPD-level finding: the
+   generated PPD must say `*cupsManualCopies: True` or `lp -n 2` prints a single copy.
 3. **DONE (was NOT RUN):** the Alpine/musl re-verification. A fresh `alpine-minirootfs` chroot
    (Alpine 3.24.2, musl 1.2.5) at commit `da1070d` reproduced every host result — musl-only
    binary, `make check` 62 PASS / 0 FAIL, `difftest` 60/60, `check-lutgen` byte-identical, and

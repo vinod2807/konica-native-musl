@@ -14,8 +14,12 @@ multi-page documents, on A4 and Letter — were run through the vendor filter an
 and compared byte for byte. They are byte-identical, except for two documents that differ in
 exactly 2 bytes each: the 4-byte alignment padding at the end of a bitmap, bytes the device never
 decodes and which the vendor fills with uninitialised heap memory (see
-`docs/ALPINE-PORT-STATUS.md` §7.2). No printer was involved in any of this: both filters wrote to
-a file.
+`docs/ALPINE-PORT-STATUS.md` §7.2). No printer was involved in that comparison: both filters wrote
+to a file.
+
+The kit has since been installed into CUPS on the host and **printed for real**: a temporary queue
+drove the USB device for a text page, a photo page, both duplex bindings and `lp -n 2`; all five
+sheets came out correct (see `docs/ALPINE-PORT-STATUS.md` §3.5).
 
 * Pure C11, libc only — no third-party libraries, builds on glibc and musl/Alpine.
 * Self-contained: no GPL/third-party encoder is vendored (the JBIG1 QM coder is

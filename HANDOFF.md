@@ -46,6 +46,10 @@ and covered by `tests/check-geometry.sh`. Two of three real documents are now by
 the third differs in 2 bytes of BIE alignment padding that the device never decodes and that
 the vendor fills with uninitialised heap memory ([§7.6](#76-jbig1-encoder-srcjbigc)).
 
+It has since been installed into CUPS on the host and **printed for real**: a temporary queue
+drove the USB device for a text page, a photo page, both duplex bindings and `lp -n 2`, and all
+five sheets came out correct (§3.5 of `docs/ALPINE-PORT-STATUS.md`).
+
 The project is **finished**. [§12](#12-known-limitations--what-is-not-verified) lists the
 only remaining uncertainties, all of them outside the tested corpus or outside the decoded
 image.
@@ -56,8 +60,10 @@ image.
 
 These were the operating constraints of the whole project and still apply:
 
-1. **Filter stdout to a file, never a printer.** The tool never opens a device. All testing
-   is offline against captured data.
+1. **Filter stdout to a file.** The tool itself never opens a device — output goes to stdout, so
+   the caller can redirect it to a file or (as CUPS does) to a backend. All byte-exactness
+   testing is offline against captured data; the later real prints went through CUPS with the
+   filter's stdout piped to the `usb` backend (§3.5 of `docs/ALPINE-PORT-STATUS.md`).
 2. **Do not guess bytes.** Every value is derived from disassembly or from a capture, and
    verified against the corpus. If something cannot be reproduced faithfully, say so and
    keep the documented runtime input instead of inventing an approximation.
@@ -151,6 +157,7 @@ screen and ICC profiles, and skips cleanly without them. `make check` additional
 | `make check-errors` | 6 / 6 | 6 / 6 |
 | `tools/verify-on-target.sh` (14 real rasters) | 14 / 14 | 14 / 14 |
 | CUPS chain (`pdftopdf`→`pdftoraster`→filter, isolated `cupsd`, no printer) | pass (2026-10-16) | pass (2026-10-16) |
+| Real prints (text, photo, duplex ×2, copies) on the host | pass (2026-10-16) | not applicable |
 | `make check-determinism` (corpus, `MALLOC_PERTURB_`) | pass | not re-run |
 
 Everything vendor-free at once: `make check`. The Alpine column is the **2026-10-16** measurement
@@ -673,11 +680,11 @@ Honest statement of scope:
 3. **The LUT generator is verified against the vendor's own installed profiles.** A different
    profile pair would legitimately produce a different table; `make check-lutgen` covers the
    vendor set.
-4. **CUPS installation** is now tested on Alpine **without a printer** (`docs/ALPINE.md`,
-   `tools/step4-cups-chain.sh`): the chain, the native PPD, the fail-safe and an isolated
-   `cupsd` all pass (§3.4 of `docs/ALPINE-PORT-STATUS.md`). **Hardware printing is still not
-   attempted** — the kit has never sent a byte to a printer. One PPD-level finding: the
-   generated PPD must say `*cupsManualCopies: True`, or `lp -n 2` prints a single copy.
+4. **CUPS installation and printing** are verified. The chain, native PPD and fail-safe were
+   tested on Alpine without a printer (§3.4 of `docs/ALPINE-PORT-STATUS.md`), and the first
+   real prints on the host all came out correct — text, photo, both duplex bindings and
+   `lp -n 2` copies (§3.5). One PPD-level finding: the generated PPD must say
+   `*cupsManualCopies: True`, or `lp -n 2` prints a single copy.
 5. **Two places where the vendor reads uninitialised heap** are deliberately not reproduced,
    because no deterministic filter can: (a) the 0–3 BIE pad bytes after the final SDNORM
    (§7.6); (b) when a raster row is not a multiple of 4 bytes, the byte just past the row,
