@@ -150,6 +150,7 @@ screen and ICC profiles, and skips cleanly without them. `make check` additional
 | `make check-mediatype` | 20 / 20 | 20 / 20 |
 | `make check-errors` | 6 / 6 | 6 / 6 |
 | `tools/verify-on-target.sh` (14 real rasters) | 14 / 14 | 14 / 14 |
+| CUPS chain (`pdftopdf`→`pdftoraster`→filter, isolated `cupsd`, no printer) | pass (2026-10-16) | pass (2026-10-16) |
 | `make check-determinism` (corpus, `MALLOC_PERTURB_`) | pass | not re-run |
 
 Everything vendor-free at once: `make check`. The Alpine column is the **2026-10-16** measurement
@@ -672,8 +673,11 @@ Honest statement of scope:
 3. **The LUT generator is verified against the vendor's own installed profiles.** A different
    profile pair would legitimately produce a different table; `make check-lutgen` covers the
    vendor set.
-4. **CUPS/printer installation** is not attempted — the kit is a stream generator, tested
-   offline. `docs/ALPINE.md` describes the install/rollback plan but marks it untested.
+4. **CUPS installation** is now tested on Alpine **without a printer** (`docs/ALPINE.md`,
+   `tools/step4-cups-chain.sh`): the chain, the native PPD, the fail-safe and an isolated
+   `cupsd` all pass (§3.4 of `docs/ALPINE-PORT-STATUS.md`). **Hardware printing is still not
+   attempted** — the kit has never sent a byte to a printer. One PPD-level finding: the
+   generated PPD must say `*cupsManualCopies: True`, or `lp -n 2` prints a single copy.
 5. **Two places where the vendor reads uninitialised heap** are deliberately not reproduced,
    because no deterministic filter can: (a) the 0–3 BIE pad bytes after the final SDNORM
    (§7.6); (b) when a raster row is not a multiple of 4 bytes, the byte just past the row,

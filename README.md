@@ -68,6 +68,12 @@ shot: it installs the build deps, unpacks the vendor runtime data, clones and bu
 `make CC=cc`, runs `make check`, and re-verifies the rasters kept by `compare-real.sh` with
 `verify-on-target.sh`.
 
+`tools/step4-cups-chain.sh mydoc.pdf "$PPD"` then exercises the CUPS raster chain on Alpine
+**without a printer**: it installs the filter and a native PPD, runs `pdftopdf → pdftoraster →
+konica-native`, and checks `lp -n 1` vs `lp -n 2` through an isolated `cupsd` with a capture
+backend. That last check found that the generated PPD needs `*cupsManualCopies: True` for
+`lp -n 2` to print two copies (see `docs/ALPINE.md`).
+
 The differential test reproduces the vendor filter's captured output byte-for-byte:
 `PASS: 60   FAIL: 0` (verified on glibc and on Alpine/musl). It needs no captured
 table: the colour-management table is regenerated from the installed ICC profiles.
@@ -118,7 +124,8 @@ src/raster.c      pure-libc CUPS raster reader (v1 / v2-RLE / v3)
 docs/             format spec and full reverse-engineering notes
 tools/            corpus capture, LUT dump recipe, raster generator, stream scanner,
                   real-document comparison (compare-real.sh, verify-on-target.sh),
-                  Alpine/musl build+verify (step3-alpine.sh)
+                  Alpine/musl build+verify (step3-alpine.sh), CUPS chain test
+                  (step4-cups-chain.sh)
 tests/            differential + reader cross-check harnesses
 ```
 

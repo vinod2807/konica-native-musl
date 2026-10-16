@@ -121,6 +121,25 @@ and musl (60/60 corpus, 27/27 reader). No source portability defect was found.
 `tools/mkraster` + `tests/libcups_dump`, both built with `-lcups`. In the Alpine chroot this
 required `apk add cups-dev`. Once built natively it passes 27/27.
 
+### 3.4 CUPS chain on Alpine, without a printer (2026-10-16)
+
+The raster chain `pdftopdf → pdftoraster → konica-native` was run on Alpine 3.24.2 with the
+generated native PPD, both by hand and through an **isolated `cupsd`** on `127.0.0.1:8631` with a
+capture backend. Nothing was sent to a printer. `tools/step4-cups-chain.sh` automates it.
+
+* filters present (`pdftopdf`, `pdftoraster`); the gstoraster path for
+  `application/vnd.cups-raster` disabled (Alpine's Ghostscript 10.05.1 makes empty rasters);
+* the filter installed at `/usr/local/lib/konica/konica-native`; a missing `.hft` → exit 1 with
+  **0 bytes** on stdout;
+* native PPD built from the full-bleed 206 PPD (`cupsFilter` → the filter, ICC lines dropped);
+* chain output: 103 538 bytes, one `@PJL EOJ`, `COMPRESS=JBIG`, `IMAGELEN` chunks — a valid
+  stream (the bytes differ from the Ubuntu host only because poppler rasterises differently);
+* **copies:** `lp -n 2` yields **one** copy, because the full-bleed PPD says
+  `*cupsManualCopies: False` and the filter — like the vendor — always emits
+  `@PJL SET COPIES=1`. With `*cupsManualCopies: True`, CUPS duplicates the pages (`lp -n 2` →
+  206 936 bytes, two pages, one job), and `konica-native` stays byte-identical to the vendor on
+  that two-page raster. See `docs/ALPINE.md` "Copies need `*cupsManualCopies: True`".
+
 ## 4. Portability fixes made
 
 One source change, to make the strict build clean (no behaviour change):
@@ -174,7 +193,8 @@ the corpus was not modified.
 | `check-geometry.sh` | PASS 6/6 | PASS 6/6 |
 | `difftest.sh` (60 cases) | **PASS 60 / FAIL 0** | **PASS 60 / FAIL 0** (re-run 2026-10-16) |
 | Real documents vs the vendor filter | 2026-10-16 re-check: `WordCraft-test`, `7.pdf`, `problematic.pdf` byte-identical; CV pad-bytes-only; a real-photo page (A4 and Letter) byte-identical (§7.2) | **PASS 14 / FAIL 0** via `tools/verify-on-target.sh` on the same rasters (2026-10-16) |
-| Printer / CUPS integration | NOT RUN | NOT RUN |
+| CUPS chain (`pdftopdf`→`pdftoraster`→filter, incl. an isolated `cupsd`) | PASS — step 4 (2026-10-16) | PASS — step 4 (2026-10-16) |
+| Printer / hardware prints | NOT RUN | NOT RUN |
 
 ### 7.1 Corrections to earlier revisions of this file
 
@@ -257,8 +277,11 @@ rather than divergent; see `docs/REVERSE-ENGINEERING.md` §9.2.
    table in `enc_open()`, *before* the first PJL byte is written, so an unreadable profile is a
    hard error with no partial output on stdout rather than a silent downgrade; the historical
    flat-tone approximation survives only behind the explicit `KONICA_FLAT_TONE=1` escape hatch.
-2. **NOT RUN:** CUPS integration on Alpine (Phase 5) and hardware testing (needs explicit user
-   approval; nothing has been sent to a printer).
+2. **PARTLY DONE:** the CUPS chain on Alpine is now verified without a printer (§3.4): filters,
+   native PPD, fail-safe and an isolated `cupsd` all pass. What is still **NOT RUN** is hardware
+   printing (step 5), which needs the printer and explicit approval — nothing has been sent to a
+   printer. One PPD-level finding: the generated PPD must say `*cupsManualCopies: True` or
+   `lp -n 2` prints a single copy.
 3. **DONE (was NOT RUN):** the Alpine/musl re-verification. A fresh `alpine-minirootfs` chroot
    (Alpine 3.24.2, musl 1.2.5) at commit `da1070d` reproduced every host result — musl-only
    binary, `make check` 62 PASS / 0 FAIL, `difftest` 60/60, `check-lutgen` byte-identical, and

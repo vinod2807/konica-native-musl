@@ -4,8 +4,9 @@ How to build and test `konica-native` natively on Alpine/musl. Verified on **Alp
 3.24.2 (x86_64, musl)** with gcc 15.2.0. See `docs/ALPINE-PORT-STATUS.md` for the exact
 baseline and test results.
 
-> Status: the **build and offline tests** below are verified. **CUPS/printer installation
-> (Phase 5) is NOT run yet** — the install/rollback section is a plan, not a tested recipe.
+> Status: the **build and offline tests** are verified, and the **CUPS raster chain is now
+> tested on Alpine without a printer** (step 4 below, `tools/step4-cups-chain.sh`). Only the
+> final prints are still outstanding — they need the printer.
 
 ## Dependencies
 
@@ -121,29 +122,60 @@ them is carried into the musl chroot, `check-reader.sh` will run the stale binar
 case reports `SKIP (mkraster)`. Remove them (`rm -f tools/mkraster tests/libcups_dump`)
 before running the tests so they are rebuilt natively.
 
-## Install (PLANNED — not yet tested)
+## Install (tested on Alpine, without a printer)
 
-Target (to be validated in Phase 5, using a temporary queue, never editing existing config):
+The chain `pdftopdf → pdftoraster → konica-native` has been exercised end-to-end on Alpine
+3.24.2 inside an **isolated `cupsd`** with a capture backend; nothing was sent to a printer.
+`tools/step4-cups-chain.sh file.pdf PPD [native-binary]` runs the whole check and prints a
+SUMMARY.
 
 ```sh
-install -Dm755 konica-native /usr/lib/cups/filter/konica-206
-# runtime screen: either the vendor install path above, or a user-supplied file via KONICA_HFT
+apk add --no-cache cups cups-client cups-filters poppler-utils ghostscript
+# Alpine's Ghostscript 10.05.1 makes empty rasters with this PPD, so disable its raster path:
+cp -a /usr/share/cups/mime/cupsfilters-ghostscript.convs /usr/share/cups/mime/cupsfilters-ghostscript.convs.orig
+sed -i '/gstoraster/ { /application\/vnd\.cups-raster/ { /^#DISABLED/! s|^|#DISABLED | } }' \
+    /usr/share/cups/mime/cupsfilters-ghostscript.convs
+
+install -m 0755 -o root -g root konica-native /usr/local/lib/konica/konica-native
+
+mkdir -p /var/lib/konica-native
+sed -e 's|^\*cupsFilter:.*|*cupsFilter: "application/vnd.cups-raster 0 /usr/local/lib/konica/konica-native"|' \
+    -e '/^\*cupsICCProfile/d' \
+    KonicaMinolta-206-fullbleed.ppd > /var/lib/konica-native/KonicaMinolta-206-native.ppd
 ```
 
-The filter's CUPS interface (argv: job-id user title copies options [file]) and the PPD
-mapping must be checked against **Alpine's** CUPS version before use. Do not assume the
-205i/225i/245i PPD describes the 206, and do not modify `/etc/cups/` or existing queues
-without explicit approval.
+Use the **full-bleed 206** PPD (not the shipped 205/225/245i ones) and keep
+`*cupsBackSide: Rotated`. CUPS runs filters with a scrubbed environment, so `KONICA_*` overrides
+do **not** apply in production: the runtime data must sit at the default path. With the screen
+missing the filter exits 1 and writes **0 bytes** (verified).
+
+Then create a *temporary* test queue and print — never edit an existing queue or `/etc/cups/`.
+
+### Copies need `*cupsManualCopies: True`
+
+The full-bleed 206 PPD says `*cupsManualCopies: False`, and `konica-native` — like the vendor
+filter — ignores the `copies` argument and always emits `@PJL SET COPIES=1`. With `False`, CUPS
+produces **one copy** for `lp -n 2` (verified with a real `cupsd` on Alpine: `lp -n 1` and
+`lp -n 2` both give a single-page, 103 538-byte stream). Adding
+
+```
+*cupsManualCopies: True
+```
+
+to the generated PPD makes CUPS duplicate the pages itself: `lp -n 2` then yields two pages in
+one job (206 936 bytes), and `konica-native` stays **byte-identical to the vendor** on that
+two-page raster. This is a PPD change, not a filter change.
 
 ## Rollback
 
-Nothing in the build or the offline tests installs anything system-wide. If the planned
-Phase-5 install is performed:
+Nothing in the build or the offline tests installs anything system-wide. If the test install
+above was performed:
 
 ```sh
-rm -f /usr/lib/cups/filter/konica-206
-# remove only the temporary test queue/PPD that was created for validation
+lpadmin -x KONICA206_NATIVE_TEST          # the temporary test queue
+rm -f /usr/local/lib/konica/konica-native
+rm -rf /var/lib/konica-native
+cp -a /usr/share/cups/mime/cupsfilters-ghostscript.convs.orig /usr/share/cups/mime/cupsfilters-ghostscript.convs
 ```
 
-Restore any pre-existing queue/PPD from the backup taken **before** the change. Because no
-source-level install step exists yet, rollback is currently a no-op.
+Restore any pre-existing queue/PPD from the backup taken **before** the change.
