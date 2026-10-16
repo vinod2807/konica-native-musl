@@ -196,9 +196,9 @@ the synthetic corpus cannot see, both now fixed:
   `PageSizeName`, and not from the raster's pixel dimensions. A real `pdftoraster` A4 page is
   4961×7016 pixels and calls itself `A4.Borderless`, a name that is absent from the PPD, so the
   old name-keyed table fell through to the pixel-dimension fallback and emitted `4960/7015`
-  instead of the vendor's `4958/7016`. The table in `src/encode.c` is now keyed on points first,
-  with `PageSizeName` and then the pixel dimensions as fallbacks; `tests/check-geometry.sh` pins
-  all three levels.
+  instead of the vendor's `4958/7016`. The table in `src/encode.c` is now keyed on points
+  **only** (either orientation), with `CUSTOM` for anything else; `tests/check-geometry.sh`
+  pins the lookup and the custom bounds.
 * **forced resolution.** The vendor reports the *device* resolution, not the raster's: rewriting
   a raster's `HWResolution` to 300 or 1200 dpi still produces a byte-identical stream with
   `@PJL SET RESOLUTION=600`. The kit now emits 600 unconditionally and warns on stderr if the
@@ -222,6 +222,15 @@ serves with `mmap` (freshly zeroed pages), and there the vendor's pad bytes are 
 though stale bytes were available. Reproducing that would mean emulating the C library's
 allocator, so the kit emits deterministic zeros; a byte-exact diff of a real document should mask
 the trailing `len % 4 ? 4 - len % 4 : 0` bytes of any page whose stream is not already 4-aligned.
+
+A second instance of the same defect was found later by the fuzzer, this time *inside* the
+decoded image: when a raster row is not a multiple of 4 bytes, the byte just past the row (the
+buffer's stride padding) is never written by the vendor, and the CMM's right-edge window reads
+it — so the page's **last column** depends on what the recycled buffer happened to hold. The
+vendor's own output then moves with `MALLOC_PERTURB_` (seed 2002: 225616 / 223567 / 223151 /
+225720 bytes for 0/1/85/170), so no deterministic filter can match it. `src/encode.c` keeps
+writing zeros and `tests/fuzz-difftest.sh` classifies such a case as vendor-nondeterministic
+rather than divergent; see `docs/REVERSE-ENGINEERING.md` §9.2.
 
 ## 8. Remaining blockers
 

@@ -197,6 +197,147 @@ def cmd_cmpmask(a):
     return 0
 
 
+def parse_prn(d: bytes):
+    """Split a device stream into (pjl_text, pages).
+
+    Two streams can then be compared structurally instead of byte-for-byte: the PJL
+    envelope must match exactly, and each page's BIE is compared on its own.
+    """
+    i = 0
+    pjl = bytearray()
+    pages, cur = [], None
+    while i < len(d):
+        if d[i:i + 9] == b"\x1b%-12345X":
+            pjl += d[i:i + 9]; i += 9; continue
+        m = re.match(rb"@PJL SET IMAGELEN=(\d+)\r\n", d[i:])
+        if m:
+            n = int(m.group(1)); s = i + m.end()
+            if cur is None:
+                cur = {"bie": bytearray(), "last_end": s}
+            cur["bie"] += d[s:s + n]
+            cur["last_end"] = s + n
+            pjl += d[i:s]
+            i = s + n
+            continue
+        m = re.match(rb"@PJL[^\r\n]*\r\n", d[i:]) or re.match(rb"\r\n", d[i:])
+        if not m:
+            raise ValueError(f"unparsed byte {d[i]:#02x} at offset {i}")
+        line = d[i:i + m.end()]
+        if b"PAGESTATUS=START" in line:
+            if cur:
+                pages.append(cur)
+            cur = {"bie": bytearray(), "last_end": 0}
+        pjl += line
+        i += m.end()
+    if cur:
+        pages.append(cur)
+    return bytes(pjl), pages
+
+
+def pad_start(bie: bytes):
+    """Offset of the first byte after the last SDNORM marker, or None.
+
+    Everything from here to the end of the BIE is 4-byte alignment padding.  The device
+    stops decoding at the final SDNORM, so those bytes are not part of the image.
+    """
+    k = bie.rfind(b"\xff\x02")
+    if k < 0:
+        return None
+    return k + 2
+
+
+def cmd_padcmp(a):
+    """Compare our stream with the vendor's, tolerating the never-decoded pad bytes.
+
+    Exits 0 when the streams are byte-identical *or* differ only in the 0-3 alignment
+    bytes after the last SDNORM of one or more pages, 1 otherwise.
+    """
+    out, ref = open(a.out, "rb").read(), open(a.ref, "rb").read()
+    if len(out) != len(ref):
+        print(f"FAIL: size differs: ours {len(out)} B, vendor {len(ref)} B")
+        return 1
+    try:
+        pjl_o, pages_o = parse_prn(out)
+        pjl_r, pages_r = parse_prn(ref)
+    except ValueError as e:
+        print(f"FAIL: cannot parse the stream: {e}")
+        return 1
+    if pjl_o != pjl_r:
+        print("FAIL: the PJL envelope differs")
+        return 1
+    if len(pages_o) != len(pages_r):
+        print(f"FAIL: page count differs: ours {len(pages_o)}, vendor {len(pages_r)}")
+        return 1
+
+    padded = []          # pages that differ only in the pad
+    for n, (po, pr) in enumerate(zip(pages_o, pages_r), 1):
+        bo, br = bytes(po["bie"]), bytes(pr["bie"])
+        if bo == br:
+            continue
+        if len(bo) != len(br):
+            print(f"FAIL: page {n}: BIE length differs: ours {len(bo)} B, vendor {len(br)} B")
+            return 1
+        so, sr = pad_start(bo), pad_start(br)
+        if so is None or sr is None:
+            print(f"FAIL: page {n}: no SDNORM marker found")
+            return 1
+        first = min(i for i in range(len(bo)) if bo[i] != br[i])
+        if first < so or first < sr:
+            print(f"FAIL: page {n}: differs at BIE offset {first}, before the pad "
+                  f"(our pad starts at {so}, vendor's at {sr})")
+            bad = [i for i in range(len(bo)) if bo[i] != br[i] and i < so and i < sr]
+            print(f"      {len(bad)} byte(s) outside the pad, first at {bad[0]}")
+            return 1
+        padded.append((n, len(bo) - max(so, sr), len(bo), first))
+
+    if not padded:
+        print("PASS: byte-identical")
+        return 0
+    tot = sum(x[1] for x in padded)
+    print(f"PASS: identical apart from {tot} alignment byte(s) after the last SDNORM "
+          f"({len(padded)} page(s))")
+    for n, p, ln, first in padded:
+        print(f"      page {n}: BIE {ln} B, pad {p} B, first differing offset {first}")
+    return 0
+
+
+def cmd_bih(a):
+    """Print each page's Bi-level Image Header: the frame size the filter *encoded*.
+
+    Comparing this with a reference tells you whether a difference is in the geometry the
+    filter chose or in the pixels it put there."""
+    d = open(a.stream, "rb").read()
+    _, pages = parse_prn(d)
+    print(f"{'page':>4} {'BIE':>9}  {'Xd':>6} {'Yd':>6} {'L0':>5} {'MX':>4} {'MY':>4} ord opts")
+    for n, p in enumerate(pages, 1):
+        b = bytes(p["bie"])
+        if len(b) < 20:
+            print(f"{n:>4} {len(b):>9}  (too short for a BIH)")
+            continue
+        if b[:4] != b"\x00\x00\x01\x00":
+            print(f"{n:>4} {len(b):>9}  (BIH magic {b[:4].hex(' ')})")
+            continue
+        xd, yd, l0 = struct.unpack_from(">3I", b, 4)
+        print(f"{n:>4} {len(b):>9}  {xd:>6} {yd:>6} {l0:>5} {b[16]:>4} {b[17]:>4} "
+              f"{b[18]:>3}  {b[19]:#04x}")
+    return 0
+
+
+def cmd_bie(a):
+    """Cut each page's BIE out of a device stream: bie <stream> <out-prefix>."""
+    d = open(a.stream, "rb").read()
+    try:
+        _, pages = parse_prn(d)
+    except ValueError as e:
+        print(f"cannot parse {a.stream}: {e}", file=sys.stderr)
+        return 1
+    for n, p in enumerate(pages, 1):
+        path = f"{a.prefix}.{n}.bie"
+        open(path, "wb").write(bytes(p["bie"]))
+        print(f"page {n}: {len(p['bie'])} B -> {path}")
+    return 0
+
+
 def cmd_common(a):
     blobs = [open(f, "rb").read() for f in a.files]
     m = min(len(b) for b in blobs)
@@ -236,6 +377,12 @@ def main():
     d = sp.add_parser("diff"); d.add_argument("a"); d.add_argument("b"); d.add_argument("-n", type=int, default=20); d.set_defaults(fn=cmd_diff)
     rg = sp.add_parser("ranges"); rg.add_argument("a"); rg.add_argument("b"); rg.set_defaults(fn=cmd_ranges)
     cm = sp.add_parser("cmpmask"); cm.add_argument("out"); cm.add_argument("ref"); cm.add_argument("mask"); cm.set_defaults(fn=cmd_cmpmask)
+    pc = sp.add_parser("padcmp", help="compare tolerating the never-decoded BIE pad bytes")
+    pc.add_argument("out"); pc.add_argument("ref"); pc.set_defaults(fn=cmd_padcmp)
+    pb = sp.add_parser("bie", help="write each page's BIE to <prefix>.<n>.bie")
+    pb.add_argument("stream"); pb.add_argument("prefix"); pb.set_defaults(fn=cmd_bie)
+    ph = sp.add_parser("bih", help="print each page's BIH (encoded frame size)")
+    ph.add_argument("stream"); ph.set_defaults(fn=cmd_bih)
     c = sp.add_parser("common"); c.add_argument("files", nargs="+"); c.set_defaults(fn=cmd_common)
     m = sp.add_parser("manifest"); m.add_argument("manifest"); m.set_defaults(fn=cmd_manifest)
     a = ap.parse_args()

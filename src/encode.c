@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 int sink_write(sink_t *s, const void *p, size_t n)
 {
@@ -46,8 +47,10 @@ static int pjl(sink_t *s, const char *fmt, ...)
  * The key is the points, not the PageSize= option and not the header's page-size *name*:
  * a real pdftoraster raster calls an A4 page "A4.Borderless" (a name absent from the PPD)
  * yet the vendor still emits the A4 geometry, while rewriting the header's points to
- * Letter -- leaving the name alone -- makes it emit the Letter geometry.  Verified
- * against the running filter (2026-10-16).
+ * Letter -- leaving the name alone -- makes it emit the Letter geometry.  A swapped pair
+ * selects the same entry, and a size that is not in the table at all becomes a CUSTOM
+ * page (see dim_from_points/custom_geometry below).  Verified against the running filter
+ * (2026-10-16).
  */
 
 struct paper { const char *psn; const char *code; unsigned px, py, pw, pl, xd, yd; };
@@ -184,114 +187,263 @@ static int to_gray(const ras_hdr_t *h, const uint8_t *line, uint8_t *gray)
     return -1;
 }
 
-/* Read the next raster row into `dst` (stride S, zero-filled past the raster
- * width).  A missing row is padded white, matching the short-page rule.
- * Returns 0, or -1 for an unsupported raster format. */
+/* PJL MEDIATYPE token for the MediaType *string in the raster header* (CUPS puts the job's
+ * media type there).  The vendor ignores the MediaType= job option entirely: with a raster
+ * saying "Plain" and the option saying "Transparency" it still emits PLAIN (verified against
+ * the running filter).  The twelve spellings below are the PPD's MediaType choices; anything
+ * else -- empty, "Auto", an unknown name -- falls back to PLAIN.  Matching is exact apart
+ * from case: "Transparency" and "transparency" map, "Transparencies" and "transparency film"
+ * do not. */
+static const char *media_type_code(const char *name)
+{
+    static const struct { const char *name, *code; } map[] = {
+        { "Plain", "PLAIN" },           { "Recycle", "RECYCLE" },
+        { "1Side", "ONESIDE" },         { "Special", "SPECIAL" },
+        { "Transparency", "TRANSPARENCY" }, { "Card1", "CARDONE" },
+        { "Card2", "CARDTWO" },         { "Envelope", "ENVELOPE" },
+        { "Plains", "PLAINS" },         { "Card1s", "CARDONES" },
+        { "Card2s", "CARDTWOS" },       { "Recycle2side", "RECYCLES" },
+    };
+    for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
+        if (strcasecmp(map[i].name, name) == 0) return map[i].code;
+    return "PLAIN";
+}
+
+/* Read the next raster row into `dst` (stride S, zero-filled past the raster width).
+ * Returns 0 when a row was read, 1 when the raster has no more rows, -1 for an
+ * unsupported raster format.
+ *
+ * The caller must NOT halftone a row that was not read: measured on the running filter,
+ * a page whose raster is shorter than the paper's image height (Yd) comes out with the
+ * *rest of the image* left dot-free, not halftoned from blank paper.  A6 (Yd 3499) with
+ * an all-ink raster, height H: H=1 -> 570 B, H=1000 -> 10588 B, H=3499 -> 35500 B, i.e.
+ * the size tracks H only; the vendor's BIH still says Yd=3499 in every case, and at H=3498
+ * its stream differs from H=3499 only in the final row.  See docs/DEVICE-STREAM.md. */
 static int row_fill(ras_t *r, const ras_hdr_t *h, uint8_t *line, uint8_t *dst,
                     size_t S)
 {
-    if (ras_read_line(r, line) == 1) {
-        if (to_gray(h, line, dst)) return -1;
-    } else {
-        memset(dst, 0, h->width);                  /* past the image: zeros */
-    }
+    if (ras_read_line(r, line) != 1) return 1;
+    if (to_gray(h, line, dst)) return -1;
     memset(dst + h->width, 0, S - h->width);
     return 0;
 }
 
-int enc_page(sink_t *s, const job_t *j, enc_res_t *res, const ras_hdr_t *h, ras_t *r)
+/* The vendor converts a page dimension given in points to device pixels at its fixed
+ * 600 dpi.  The two numbers it publishes for such a dimension -- PAPERWIDTH/PAPERLENGTH
+ * and the BIE's Xd/Yd -- are not simply floor(points * 600 / 72): the running filter
+ * publishes one pixel more when the point count is 8 mod 9 and encodes one pixel less
+ * when it is 1, 3 or 6 mod 9.  This reproduces every number in papers[] below and a
+ * 69-point sweep of custom sizes (see docs/REVERSE-ENGINEERING.md). */
+static void dim_from_points(unsigned pt, unsigned *pub, unsigned *enc)
+{
+    unsigned base = (unsigned)((uint64_t)pt * 25 / 3);   /* floor(pt * 600 / 72) */
+    unsigned r = pt % 9;
+    *pub = base + (r == 8);
+    *enc = base - (r == 1 || r == 3 || r == 6);
+}
+
+/* Resolve the page geometry from the raster header's page size in points.  Returns 0 and
+ * fills the outputs, or -1 when the vendor would refuse the page (it exits 2 having
+ * written nothing) because the size is outside its supported range. */
+static int page_geometry(const ras_hdr_t *h, const char **code, unsigned *pw, unsigned *pl,
+                         uint32_t *xd, uint32_t *yd)
 {
     const struct paper *pp = NULL;
     unsigned i;
-    uint32_t xd, yd;
 
-    /* Select by page-size points (what the vendor uses); fall back to the header's
-     * page-size name, then to the raster dimensions for an unknown size. */
+    /* The vendor keys the geometry on the page size in points -- not on the PageSize=
+     * option, not on the header's page-size name and not on the raster's pixel
+     * dimensions.  A swapped pair selects the same entry (points 842x595 pick A4 just as
+     * 595x842 do), because the page may be described either way round. */
     for (i = 0; i < sizeof papers / sizeof papers[0]; i++)
         if (papers[i].px == h->page_size[0] && papers[i].py == h->page_size[1]) { pp = &papers[i]; break; }
     if (!pp)
         for (i = 0; i < sizeof papers / sizeof papers[0]; i++)
-            if (!strcmp(papers[i].psn, h->page_size_name)) { pp = &papers[i]; break; }
+            if (papers[i].px == h->page_size[1] && papers[i].py == h->page_size[0]) { pp = &papers[i]; break; }
+    if (pp) {
+        *code = pp->code; *pw = pp->pw; *pl = pp->pl; *xd = pp->xd; *yd = pp->yd;
+        return 0;
+    }
 
-    unsigned pw = pp ? pp->pw : h->width;
-    unsigned pl = pp ? pp->pl : (h->height ? h->height - 1 : 0);
-    xd = pp ? pp->xd : (h->width ? h->width - 1 : 0);
-    yd = pp ? pp->yd : (h->height ? h->height - 1 : 0);
+    unsigned a = h->page_size[0], b = h->page_size[1];
+    unsigned lo = a < b ? a : b, hi = a < b ? b : a;
+    if (lo < 72 || lo > 864 || hi > 1224) {
+        fprintf(stderr, "ERROR: konica-native: page size %ux%u points is outside the "
+                        "supported range (shorter side 72..864, longer side <= 1224)\n", a, b);
+        return -1;
+    }
+    dim_from_points(lo, pw, xd);
+    dim_from_points(hi, pl, yd);
+    *code = "CUSTOM";
+    return 0;
+}
 
-    /* Build the 1-bit page image. Rows beyond the raster are left white. */
+/* True when the page's size resolves to a supported geometry (reports the reason on
+ * stderr when it does not).  Lets main refuse the whole job before writing a single byte,
+ * exactly as the vendor does, instead of emitting a truncated PJL header. */
+int enc_page_size_ok(const ras_hdr_t *h)
+{
+    const char *code; unsigned pw, pl; uint32_t xd, yd;
+    return page_geometry(h, &code, &pw, &pl, &xd, &yd) == 0;
+}
+
+/* The vendor's DUPLEX/BINDING pair is not just the Duplex= option.  It combines that
+ * option with the raster header's own Duplex/Tumble fields and with sides=, and it names
+ * the edge from the *page orientation*: a landscape page (points wider than tall) swaps
+ * the two names.  Measured against the running filter over a 256-combination grid
+ * (docs/REVERSE-ENGINEERING.md).  Two vendor quirks to keep in mind:
+ *   * Duplex= is matched case-insensitively, sides= case-sensitively;
+ *   * sides=two-sided-short-edge becomes LONGEDGE and sides=two-sided-long-edge becomes
+ *     SHORTEDGE -- the opposite of CUPS' naming (a vendor bug we reproduce faithfully).
+ * When neither option names a duplex mode the header's Tumble supplies the binding, and
+ * the header's Duplex can force DUPLEX=ON on its own.
+ *
+ * The vendor resolves this once per job, from the *first* page's header, and prints the
+ * same DUPLEX/BINDING pair on every page: a two-page job whose pages differ in orientation
+ * (595x842 then 842x595) or in their header Duplex/Tumble fields still gets one pair,
+ * derived from page 1 (verified against the running filter, 2026-10-16).  enc_page() calls
+ * this only while j->dup_known is clear. */
+static void duplex_binding(const job_t *j, const ras_hdr_t *h, int *on, int *longedge)
+{
+    int tumble;
+    if (j->duplex_opt) {                       /* Duplex= present: it owns the binding */
+        *on = (j->duplex_opt != 1) || (h->duplex != 0);
+        tumble = j->duplex_opt == 3 ? 1 : j->duplex_opt == 2 ? 0 : (h->tumble != 0);
+    } else {                                   /* else sides=, else the header */
+        *on = (h->duplex != 0) || (j->sides >= 2);
+        tumble = j->sides == 3 ? 1 : j->sides == 2 ? 0 : (h->tumble != 0);
+    }
+    *longedge = tumble ^ (h->page_size[0] > h->page_size[1]);
+}
+
+int enc_page(sink_t *s, job_t *j, enc_res_t *res, const ras_hdr_t *h, ras_t *r)
+{
+    const char *code;
+    uint32_t xd, yd, pw, pl;
+
+    if (page_geometry(h, &code, &pw, &pl, &xd, &yd)) return -1;
+
+    /* Build the 1-bit page image.  Rows the raster does not provide stay dot-free
+     * (see row_fill). */
     size_t stride = (xd + 7) / 8;
     uint8_t *img = calloc(1, stride * (yd ? yd : 1));
     uint8_t *line = malloc(h->bytes_per_line ? h->bytes_per_line : 1);
-    /* The vendor keeps the source as one contiguous image whose row stride is
-     * the raster row rounded up to 4 bytes, so the 3-tap CMM window at the
-     * right edge reads the first bytes of the following row rather than a zero
-     * pad (verified against the running filter).  The CMM itself runs over
-     * buffers of at most 2^24 bytes, i.e. bands of floor(2^24 / stride) rows;
-     * at a band's last row the window reads past the band into the adjacent
-     * allocation, which the evidence shows to be that band's *output* buffer,
-     * i.e. the raw Phi of the band's first row.  Model both with a two-row
-     * window (see docs/REVERSE-ENGINEERING.md). */
-    size_t S = ((size_t)h->width + 3) & ~(size_t)3;
-    if (S < xd) S = xd;
-    unsigned band_h = (unsigned)(16777216u / S);
-    if (band_h == 0) band_h = 1;
-    uint8_t *ra = calloc(1, S), *rb = calloc(1, S);
-    int *tone = malloc((xd ? xd : 1) * sizeof *tone);
-    uint8_t (*r2)[2] = calloc(h->height ? h->height : 1, 2);
-    if (!img || !line || !ra || !rb || !tone || !r2) {
-        free(img); free(line); free(ra); free(rb); free(tone); free(r2); return -1;
-    }
+    if (!img || !line) { free(img); free(line); return -1; }
 
-    if (row_fill(r, h, line, ra, S)) {
-        fprintf(stderr, "ERROR: konica-native: unsupported raster %ubpp cs=%u\n",
-                h->bits_per_pixel, h->color_space);
-        free(img); free(line); free(ra); free(rb); free(tone); free(r2);
-        return -1;
-    }
-    r2[0][0] = ra[0]; r2[0][1] = ra[1];
-    unsigned fb0 = 0, fb1 = 0;                 /* raw Phi, band's first row */
-    for (uint32_t y = 0; y < yd; y++) {
-        row_fill(r, h, line, rb, S);               /* row y + 1 (white past end) */
-        if (y + 1 < h->height) { r2[y + 1][0] = rb[0]; r2[y + 1][1] = rb[1]; }
-        unsigned bstart = (unsigned)(y / band_h) * band_h;
-        unsigned blen = yd - bstart; if (blen > band_h) blen = band_h;
-        int band_first = (y == bstart);
-        int band_last  = (y == bstart + blen - 1);
-        unsigned wb[2] = { 0, 0 };                 /* bytes S and S+1 of the row */
-        if (band_last) {
-            if (blen == band_h) { wb[0] = fb0; wb[1] = fb1; }
-            else if (bstart >= band_h) {           /* leftover of the prior band */
-                uint32_t lr = bstart - band_h + blen;
-                if (lr < h->height) { wb[0] = r2[lr][0]; wb[1] = r2[lr][1]; }
+    if (h->bits_per_pixel == 1) {
+        /* Bilevel rasters bypass the colour and halftone pipeline: the running filter copies
+         * the bits straight into the page image -- bit set is ink -- cropping to Xd x Yd and
+         * leaving everything the raster does not cover dot-free.  Measured on A6 (Xd 2475,
+         * Yd 3499): an all-ink 1bpp raster yields exactly 2475*3499 ink pixels, an all-white
+         * one yields none, a checker yields half, and a rectangle drawn in the raster lands on
+         * the same pixels (docs/REVERSE-ENGINEERING.md).  The raster's colour space makes no
+         * difference (cs=0 and cs=3 behave identically).  The corpus is all 8bpp, which is
+         * how this went unnoticed until the fuzzer exercised 1bpp. */
+        for (uint32_t y = 0; y < yd; y++) {
+            unsigned n;
+            if (ras_read_line(r, line) != 1) break;
+            n = h->width < xd ? h->width : xd;
+            if (n) {
+                unsigned nb = (n + 7) / 8;
+                memcpy(img + (size_t)y * stride, line, nb);
+                /* Bits past Xd inside the last byte are padding in the BIE: keep them clear. */
+                if (n & 7) img[(size_t)y * stride + nb - 1] &= (uint8_t)(0xffu << (8 - (n & 7)));
             }
         }
-        for (uint32_t x = 0; x < xd; x++) {
-            int v0 = ra[x], v1, v2;
-            if (x + 1 < S) v1 = ra[x + 1];
-            else v1 = band_last ? (int)wb[x + 1 - S] : rb[x + 1 - S];
-            if (x + 2 < S) v2 = ra[x + 2];
-            else v2 = band_last ? (int)wb[x + 2 - S] : rb[x + 2 - S];
-            if (res->acmm) {
-                int raw = acmm_phi(res->acmm, v0, v1, v2);
-                if (band_first && x < 2) { if (x == 0) fb0 = (unsigned)raw; else fb1 = (unsigned)raw; }
-                /* OCM_TonerSave TRUE (and absent) subtracts 10 from the CMM
-                 * output before halftoning; FALSE passes it through unchanged
-                 * (verified against the running filter, see docs/REVERSE-ENGINEERING.md). */
-                int t = raw - (j->toner_save ? 10 : 0);
-                tone[x] = t > 0 ? t : 0;
-            } else {
-                tone[x] = (j->toner_save ? 245 : 255) - ra[x];  /* flat-tone approximation */
-                if (band_first && x < 2) { if (x == 0) fb0 = (unsigned)tone[x]; else fb1 = (unsigned)tone[x]; }
-            }
+        while (ras_read_line(r, line) == 1)
+            ;
+        free(line);
+    } else {
+        /* The vendor keeps the source as one contiguous image whose row stride is
+         * the raster row rounded up to 4 bytes, so the 3-tap CMM window at the
+         * right edge of the raster reads into the following row rather than a zero
+         * pad (verified against the running filter).  The CMM itself runs over
+         * buffers of at most 2^24 bytes, i.e. bands of floor(2^24 / stride) rows;
+         * at a band's last row the window reads past the band into the adjacent
+         * allocation, which the evidence shows to be that band's *output* buffer,
+         * i.e. the raw Phi of the band's first row.  Model both with a two-row
+         * window (see docs/REVERSE-ENGINEERING.md). */
+        size_t S = ((size_t)h->width + 3) & ~(size_t)3;
+        unsigned band_h = (unsigned)(16777216u / S);
+        if (band_h == 0) band_h = 1;
+        uint8_t *ra = calloc(1, S), *rb = calloc(1, S);
+        int *tone = malloc((xd ? xd : 1) * sizeof *tone);
+        uint8_t (*r2)[2] = calloc(h->height ? h->height : 1, 2);
+        if (!ra || !rb || !tone || !r2) {
+            free(img); free(line); free(ra); free(rb); free(tone); free(r2); return -1;
         }
-        halftone_row(res->ht, tone, (int)xd, (int)y, img + (size_t)y * stride);
-        uint8_t *tmp = ra; ra = rb; rb = tmp;
+
+        int st = row_fill(r, h, line, ra, S);
+        if (st < 0) {
+            fprintf(stderr, "ERROR: konica-native: unsupported raster %ubpp cs=%u\n",
+                    h->bits_per_pixel, h->color_space);
+            free(img); free(line); free(ra); free(rb); free(tone); free(r2);
+            return -1;
+        }
+        int present = (st == 0);                   /* is the row we are about to halftone real? */
+        /* Columns the raster does not provide stay dot-free too: the running filter halftones
+         * only the rectangle the raster actually covers.  Measured on A6 (Xd 2475): with a
+         * 2474-column raster the vendor's image has exactly one column fewer (3499 dots) than
+         * ours had, and with a fully white 2400-column raster its page is entirely dot-free.
+         * With width >= Xd -- every real job -- the limit never binds. */
+        unsigned xout = h->width < xd ? h->width : xd;
+        r2[0][0] = ra[0]; r2[0][1] = ra[1];
+        unsigned fb0 = 0, fb1 = 0;                 /* raw Phi, band's first row */
+        for (uint32_t y = 0; y < yd; y++) {
+            st = row_fill(r, h, line, rb, S);          /* row y + 1 */
+            if (st < 0) {
+                fprintf(stderr, "ERROR: konica-native: unsupported raster %ubpp cs=%u\n",
+                        h->bits_per_pixel, h->color_space);
+                free(img); free(line); free(ra); free(rb); free(tone); free(r2);
+                return -1;
+            }
+            if (st == 0 && y + 1 < h->height) { r2[y + 1][0] = rb[0]; r2[y + 1][1] = rb[1]; }
+            if (!present) {                            /* past the raster: img row stays zero */
+                uint8_t *skip = ra; ra = rb; rb = skip;
+                present = (st == 0);
+                continue;
+            }
+            unsigned bstart = (unsigned)(y / band_h) * band_h;
+            unsigned blen = yd - bstart; if (blen > band_h) blen = band_h;
+            int band_first = (y == bstart);
+            int band_last  = (y == bstart + blen - 1);
+            unsigned wb[2] = { 0, 0 };                 /* bytes S and S+1 of the row */
+            if (band_last) {
+                if (blen == band_h) { wb[0] = fb0; wb[1] = fb1; }
+                else if (bstart >= band_h) {           /* leftover of the prior band */
+                    uint32_t lr = bstart - band_h + blen;
+                    if (lr < h->height) { wb[0] = r2[lr][0]; wb[1] = r2[lr][1]; }
+                }
+            }
+            for (uint32_t x = 0; x < xout; x++) {
+                int v0 = ra[x], v1, v2;
+                if (x + 1 < S) v1 = ra[x + 1];
+                else v1 = band_last ? (int)wb[x + 1 - S] : rb[x + 1 - S];
+                if (x + 2 < S) v2 = ra[x + 2];
+                else v2 = band_last ? (int)wb[x + 2 - S] : rb[x + 2 - S];
+                if (res->acmm) {
+                    int raw = acmm_phi(res->acmm, v0, v1, v2);
+                    if (band_first && x < 2) { if (x == 0) fb0 = (unsigned)raw; else fb1 = (unsigned)raw; }
+                    /* OCM_TonerSave TRUE (and absent) subtracts 10 from the CMM
+                     * output before halftoning; FALSE passes it through unchanged
+                     * (verified against the running filter, see docs/REVERSE-ENGINEERING.md). */
+                    int t = raw - (j->toner_save ? 10 : 0);
+                    tone[x] = t > 0 ? t : 0;
+                } else {
+                    tone[x] = (j->toner_save ? 245 : 255) - ra[x];  /* flat-tone approximation */
+                    if (band_first && x < 2) { if (x == 0) fb0 = (unsigned)tone[x]; else fb1 = (unsigned)tone[x]; }
+                }
+            }
+            halftone_row(res->ht, tone, (int)xout, (int)y, img + (size_t)y * stride);
+            uint8_t *tmp = ra; ra = rb; rb = tmp;
+            present = (st == 0);
+        }
+        /* libcups writes `height` rows per page while we encode only `yd` of them
+         * (yd == height - 1); drain the rest so the next page header stays aligned. */
+        while (ras_read_line(r, line) == 1)
+            ;
+        free(line); free(ra); free(rb); free(tone); free(r2);
     }
-    /* libcups writes `height` rows per page while we encode only `yd` of them
-     * (yd == height - 1); drain the rest so the next page header stays aligned. */
-    while (ras_read_line(r, line) == 1)
-        ;
-    free(line); free(ra); free(rb); free(tone); free(r2);
 
     uint8_t *bie = NULL; size_t blen = 0;
     if (jbig_encode_bie(xd, yd, img, stride, 128, 0x48, &bie, &blen)) {
@@ -300,19 +452,25 @@ int enc_page(sink_t *s, const job_t *j, enc_res_t *res, const ras_hdr_t *h, ras_
     free(img);
 
     /* ---- page header ---- */
+    int dup_on, longedge;
+    if (!j->dup_known) {                       /* the vendor fixes the pair on page 1 */
+        duplex_binding(j, h, &j->dup_on, &j->longedge);
+        j->dup_known = 1;
+    }
+    dup_on = j->dup_on; longedge = j->longedge;
     if (pjl(s, "@PJL SET PAGESTATUS=START\r\n")) goto err;
-    if (j->duplex == 0) {
+    if (!dup_on) {
         if (wr(s, "@PJL SET DUPLEX=OFF\r\n")) goto err;
     } else {
         if (wr(s, "@PJL SET DUPLEX=ON\r\n")) goto err;
-        if (wr(s, j->duplex == 1 ? "@PJL SET BINDING=SHORTEDGE\r\n"
-                                 : "@PJL SET BINDING=LONGEDGE\r\n")) goto err;
+        if (wr(s, longedge ? "@PJL SET BINDING=LONGEDGE\r\n"
+                           : "@PJL SET BINDING=SHORTEDGE\r\n")) goto err;
     }
-    if (pjl(s, "@PJL SET PAPER=%s\r\n", pp ? pp->code : "A4")) goto err;
+    if (pjl(s, "@PJL SET PAPER=%s\r\n", code)) goto err;
     if (pjl(s, "@PJL SET PAPERWIDTH=%u\r\n", pw)) goto err;
     if (pjl(s, "@PJL SET PAPERLENGTH=%u\r\n", pl)) goto err;
     if (wr(s, "@PJL SET MEDIASOURCE=AUTO\r\n")) goto err;
-    if (wr(s, "@PJL SET MEDIATYPE=PLAIN\r\n")) goto err;
+    if (pjl(s, "@PJL SET MEDIATYPE=%s\r\n", media_type_code(h->media_type))) goto err;
     /* The vendor reports the *device* resolution, not the raster's: a raster whose
      * HWResolution was rewritten to 300 or 1200 dpi still yields an identical stream
      * with RESOLUTION=600 (verified against the running filter, 2026-10-16). */

@@ -318,16 +318,14 @@ The job is `\r\n`-terminated PJL lines wrapped in a UEL (`\x1b%-12345X`).
 \x1b%-12345X\r\n
 ```
 
-Option mapping:
+Option mapping (full rule in `docs/REVERSE-ENGINEERING.md` §4.2.1):
 
 | CUPS option | PJL |
 |---|---|
-| `Duplex=None` | `DUPLEX=OFF`, no `BINDING` line |
-| `Duplex=DuplexNoTumble` (long edge) | `DUPLEX=ON` + `BINDING=SHORTEDGE` |
-| `Duplex=DuplexTumble` (short edge) | `DUPLEX=ON` + `BINDING=LONGEDGE` |
-| `PageSize` | `PAPER=<code>` + `PAPERWIDTH` + `PAPERLENGTH` |
-| `Resolution` | `RESOLUTION=<dpi>` |
-| `MediaType=Plain` | `MEDIATYPE=PLAIN` + fixed `MEDIASOURCE=AUTO` |
+| `Duplex=` / `sides=` | `DUPLEX`/`BINDING`, combined with the header's `Duplex`/`Tumble` and the page orientation; resolved once per job from page 1 |
+| `PageSize` | *(ignored)*: `PAPER`/`PAPERWIDTH`/`PAPERLENGTH` come from the header's points |
+| `Resolution` | *(ignored)*: `RESOLUTION=600` always (the device's dpi) |
+| `MediaType=` | *(ignored)*: `MEDIATYPE=` comes from the header's `MediaType` string; `MEDIASOURCE=AUTO` fixed |
 
 `OCM_TonerSave` never appears in the envelope — it only changes page pixels.
 
@@ -373,12 +371,13 @@ transcribed from the corpus into `papers[]` in `src/encode.c`:
 | `Tabloid` | `LEDGER` | 6600 | 10200 | 6600 | 10200 |
 
 The page size is selected from the raster header's `PageSize` **in points** (that is what the
-vendor keys on), falling back to `page_size_name` and then to the raster's pixel dimensions.
-The points are what matters in practice: a real `pdftoraster` A4 page is 4961×7016 and calls
-itself `A4.Borderless`, which is not a PPD name at all, yet it must select the A4 row. For an
-unknown size the code falls back to `width` / `height-1` / `width-1` / `height-1`.
+vendor keys on) — `page_size_name` and the raster's pixel dimensions are *not* consulted. A
+pair matches in either orientation (`842×595` = `595×842`); a pair that matches nothing becomes
+`PAPER=CUSTOM` (shorter side first) while the shorter side is 72..864 pt and the longer at most
+1224 pt, and is refused (no output) outside that. Each point count `pt` gives
+`base = floor(pt*600/72)`, published `base + (pt%9==8)`, encoded `base − (pt%9 ∈ {1,3,6})`.
 `RESOLUTION=600` is hard-coded: the vendor ignores the raster's `HWResolution`.
-`tests/check-geometry.sh` pins the lookup order and the forced resolution.
+`tests/check-geometry.sh` pins the lookup, the custom bounds and the forced resolution.
 
 > Worked example for A4: raster 4958×7017 → image 4957×7016, BIH
 > `00 00 01 00 · 00 00 13 5d · 00 00 1b 68 · 00 00 00 80 · 00 00 03 48`.
@@ -511,7 +510,17 @@ the wrap bytes are therefore *not* the next page row:
 
 Rows past the end of the raster are all-zero.
 
-`src/encode.c` models this with a two-row window (`ra`, `rb`), an accumulating `r2[y]` of
+**The `width..S-1` pad bytes are not always zero.** The vendor writes only `bytes_per_line`
+bytes per row and never touches the rest, so with a fresh (mmap'd, zero) buffer they read as
+zero — which is what the corpus, the real documents and the model assume. But in a multi-page
+job the buffer is recycled, and the byte just past the row holds the previous occupant's data;
+the right-edge window then reads it and the page's **last column** changes. Fuzzer seed 2002
+shows it exactly: all 1157 differing bits sit in column `Xd-1`, and the vendor's own output
+moves with `MALLOC_PERTURB_` (225616 / 223567 / 223151 / 225720 bytes for 0/1/85/170). So the
+vendor is not deterministic there and no filter can match it; `src/encode.c` writes zeros and
+`tests/fuzz-difftest.sh` reports such a case as vendor-nondeterministic.
+
+`src/encode.c` models the wrap with a two-row window (`ra`, `rb`), an accumulating `r2[y]` of
 "first two bytes of page row y", and an explicit `wb[2]` array for the band-last case.
 
 ### 10.7 The tone transform (`OCM_TonerSave`)
@@ -567,9 +576,10 @@ Five planes; plane 0 is 96×96 (128×128 for planes 1–4). Only **plane 0** is 
 `src/halftone.c` parses this and loads plane 0. The screen is **never embedded** — it is
 loaded at runtime (`KONICA_HFT`, else the vendor install path).
 
-A missing screen is a hard error for both. Measured with the `.hft` temporarily removed:
-the **vendor writes nothing at all and exits 2** (its `HalftonesInit` fails before any
-output); the **kit writes the 119-byte job header, reports the error and exits 1**.
+A missing screen is a hard error for both. Measured with the `.hft` temporarily removed: the
+**vendor writes nothing at all and exits 2** (its `HalftonesInit` fails before any output), and
+the **kit writes nothing at all and exits 1** — the screen is loaded in `enc_open()` *before*
+the first PJL byte, so a broken install cannot leave a plausible-looking partial job.
 
 ### 11.2 The per-pixel rule
 
@@ -580,6 +590,13 @@ dot(x, y) = ( tone[x] >= screen[(page_row) % 96][x % 96] )      # cmp / setae
 ```
 
 The **row phase is the page row**, not a per-band row, and the column phase is `x % 96`.
+
+**1-bit rasters never reach this stage.** The vendor copies their bits straight into the page
+image — bit set is ink — cropped to `Xd`×`Yd`, leaving the uncovered area dot-free and ignoring
+the colour space (`cs=0` and `cs=3` are identical). Measured on A6 (`Xd` 2475, `Yd` 3499):
+all-ink → exactly 2475×3499 ink pixels, all-white → none, checker → half. `src/encode.c`
+branches on `bits_per_pixel == 1` before the CMM; the corpus is all 8bpp, so only the fuzzer
+exercised it.
 
 The full model is therefore:
 
@@ -758,9 +775,11 @@ is what was tested.
 ### 14.4 What has *not* been verified
 
 * Page sizes, raster formats or option combinations **absent from the corpus** are handled
-  by the model but not exercised end-to-end. The reader (and `--dump`) is cross-checked on
-  1-bit gray and RGB/CMYK rasters, but the *filter* path only converts 8-bit and 1-bit gray
-  (`to_gray`, `src/encode.c`) — the corpus exercises 8-bit gray only.
+  by the model but not exercised end-to-end *by the corpus*; the differential fuzzer
+  (`tests/fuzz-difftest.sh`) and the real-document test (`tests/real-docs.sh`) cover many of
+  them, and each fuzzer-found defect is now pinned by a test. The filter path converts 8-bit
+  and 1-bit rasters (1bpp bypasses the CMM and the halftone entirely — see
+  [§11.2](#112-the-per-pixel-rule)); the corpus exercises 8-bit gray only.
 * The CMM table generator is verified only against the vendor's own installed profiles
   (`sRGB.icm` + `sGrayInv.icm`); a different profile pair would legitimately change the
   table. `make check-lutgen` covers the vendor set (see [§15](#15-lut-provenance--resolved)).
@@ -865,9 +884,10 @@ use — no jbigkit code is in the kit.
 
 ```sh
 make
+make check                                     # vendor-free: reader, CMM table, geometry, MEDIATYPE, hardening
 tests/difftest.sh /root/konica-corpus-full     # 60/60, LUT regenerated from the profiles
-make check-reader                              # 27/27
-make check-lutgen                              # regenerated 33³ table == the vendor's
+make check-real                                # real PDFs through pdftopdf + pdftoraster
+make check-fuzz                                # randomised differential fuzzing
 ```
 
 ---
@@ -876,22 +896,31 @@ make check-lutgen                              # regenerated 33³ table == the v
 
 | File | Lines | Role |
 |---|---|---|
-| `src/main.c` | 101 | filter entry point; parses `Duplex`, `OCM_TonerSave`; `--dump` reader check |
+| `src/main.c` | 125 | filter entry point; parses `Duplex`/`sides`/`OCM_TonerSave`; page-size pre-check; `--dump` reader check |
 | `src/raster.c` / `.h` | 153 / 41 | pure-libc CUPS raster reader (v1, v2-RLE, v3) |
-| `src/encode.c` / `.h` | 290 / 23 | PJL framing, page geometry, bands, edge wrap, tone, chunking |
+| `src/encode.c` / `.h` | 495 / 46 | PJL framing, page geometry, bands, edge wrap, tone, 1bpp pass-through, chunking |
 | `src/acmm.c` / `.h` | 62 / 42 | Φ: 33³ tetrahedral interpolation |
-| `src/lutgen.c` / `.h` | 250 / 44 | regenerates the 33³ CMM table from the installed ICC profiles |
+| `src/lutgen.c` / `.h` | 254 / 44 | regenerates the 33³ CMM table from the installed ICC profiles |
 | `src/halftone.c` / `.h` | 61 / 35 | `.hft` loader + per-pixel screen rule |
-| `src/jbig.c` / `.h` | 203 / 29 | JBIG1 encoder (BIH, QM coder, stripes, padding) |
+| `src/jbig.c` / `.h` | 206 / 46 | JBIG1 encoder (BIH, QM coder, stripes, padding) |
 | `tests/difftest.sh` | 37 | differential test vs captured vendor output |
-| `tests/check-reader.sh` | 47 | reader cross-check vs libcups |
+| `tests/real-docs.sh` | 88 | real PDFs through the `pdftopdf`+`pdftoraster` chain |
+| `tests/fuzz-difftest.sh` | 121 | randomised differential fuzzer (classifies vendor nondeterminism) |
+| `tests/check-reader.sh` | 48 | reader cross-check vs libcups |
 | `tests/check-lutgen.sh` | 51 | regenerated CMM table vs the vendor's |
+| `tests/check-geometry.sh` | 147 | points→pixels, CUSTOM bounds, forced 600 dpi |
+| `tests/check-mediatype.sh` | 85 | PJL MEDIATYPE golden table (vendor-free) |
+| `tests/check-errors.sh` | 86 | runtime-data hardening / failure modes |
+| `tests/check-determinism.sh` | 52 | same raster twice, once with `MALLOC_PERTURB_` |
+| `tests/mkpdf.py` | 73 | generates a test PDF (so no private document is committed) |
 | `tests/libcups_dump.c` | 31 | libcups-based reader oracle |
 | `tools/dump-lut.gdb` | 37 | reproducible 33³ LUT extraction |
 | `tools/lutgen-dump.c` | 22 | writes the regenerated table for `check-lutgen.sh` |
 | `tools/capture-corpus.sh` | 129 | corpus capture (L0) |
-| `tools/mkraster.c` | 185 | synthetic CUPS raster generator |
-| `tools/prnscan.py` | 246 | scan / diff / cmpmask / manifest |
+| `tools/mkraster.c` | 185 | synthetic CUPS raster generator (libcups) |
+| `tools/mkras.py` | 281 | dependency-free CUPS raster writer (`--random`, `--meta`, …) |
+| `tools/prnscan.py` | 393 | scan / diff / ranges / cmpmask / padcmp / manifest / bie / bih |
+| `tools/biedec.c` | 62 | JBIG1 decoder for pixel-level comparison (diagnostic only) |
 
 Call graph for a page:
 
@@ -982,13 +1011,25 @@ The *table itself* is regenerated by `src/lutgen.c`; the pipeline and its consta
 
 ### 19.3 Option/geometry quick reference
 
-* 600 dpi, 8-bit gray, `CUPS_CSPACE_W`, CUPS raster v2 (RLE).
+* 600 dpi, 8-bit gray, `CUPS_CSPACE_W`, CUPS raster v2 (RLE); 1-bit rasters are copied
+  through, not halftoned.
 * A4 raster 4958×7017 → image 4957×7016.
 * Chunk size 32768; `l0` 128; options `0x48`; order `3`.
 * `OCM_TonerSave` subtracts 10 (default on).
+* Geometry is keyed on the header's `PageSize` **in points** only; unknown pairs become
+  `PAPER=CUSTOM` (72..864 pt short side, ≤1224 pt long side).
+* `DUPLEX`/`BINDING` are resolved once per job, from page 1.
 
 ### 19.4 Change log for this document
 
+* **2026-10-16** — second verification pass. New: the points→pixel rule
+  (`base + (pt%9==8)` published, `base − (pt%9∈{1,3,6})` encoded), the `CUSTOM` fallback and
+  its bounds, removal of the `PageSizeName`/pixel fallbacks; the orientation-dependent
+  `DUPLEX`/`BINDING` rule (resolved once per job from page 1, `Duplex=` case-insensitive vs
+  `sides=` case-sensitive); the 1bpp pass-through; the second uninitialised-heap site (the byte
+  past a non-4-aligned raster row, which moves the page's last column with `MALLOC_PERTURB_`).
+  New tools (`prnscan.py padcmp|bie|bih`, `mkras.py`, `biedec`) and tests (`real-docs`,
+  `check-mediatype`, `check-errors`, `check-determinism`, `fuzz-difftest`, `check-asan`).
 * **2026-10-15** — created. Consolidates `REVERSE-ENGINEERING.md`,
   `DEVICE-STREAM.md` and the port notes; records the 16K edge-wrap fix, the
   `OCM_TonerSave` proof, the verified Φ model, the verified LUT dump recipe, and the

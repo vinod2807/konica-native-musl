@@ -129,11 +129,13 @@ make clean && make CFLAGS='-O2 -std=c11 -Wall -Wextra -Wpedantic -Wconversion -W
 
 ```sh
 make check-geometry
-# → check-geometry: all cases pass     (6 cases)
+# → check-geometry: all cases pass
 ```
 
-Pins the points → `PageSizeName` → pixel-dimension lookup order and the forced 600 dpi. Needs
-the vendor halftone screen and ICC profiles, and skips cleanly without them.
+Pins the points-only size lookup (either orientation), the `CUSTOM` fallback and its 72..864 /
+≤1224 pt bounds, the point→pixel rule, and the forced 600 dpi. Needs the vendor halftone
+screen and ICC profiles, and skips cleanly without them. `make check` additionally runs
+`check-mediatype` and `check-errors`, which need no vendor filter at all.
 
 ### 3.6 Verified result matrix
 
@@ -144,10 +146,13 @@ the vendor halftone screen and ICC profiles, and skips cleanly without them.
 | `tests/difftest.sh` (LUT regenerated, no `KONICA_LUT`) | **60 / 60** | **60 / 60** |
 | `make check-lutgen` | PASS | PASS |
 | `make check-reader` | 27 / 27 | 27 / 27 |
-| `make check-geometry` | 6 / 6 | not re-run (rootfs removed) |
+| `make check-geometry` | pass | not re-run (rootfs removed) |
+| `make check-mediatype` | 20 / 20 | not re-run |
+| `make check-errors` | 6 / 6 | not re-run |
+| `make check-determinism` (corpus, `MALLOC_PERTURB_`) | pass | not re-run |
 
-Everything at once: `make check`. The Alpine column is the 2026-10-15 measurement; the
-Alpine rootfs has since been removed from the authoring machine, and the changes made since
+Everything vendor-free at once: `make check`. The Alpine column is the 2026-10-15 measurement;
+the Alpine rootfs has since been removed from the authoring machine, and the changes made since
 add no dependency beyond C11 + POSIX.
 
 ---
@@ -281,20 +286,31 @@ Once per page:
 
 Job end: `@PJL EOJ\r\n\x1b%-12345X\r\n`.
 
-Option mapping: `Duplex=DuplexNoTumble`→`ON`+`BINDING=SHORTEDGE`;
-`Duplex=DuplexTumble`→`ON`+`BINDING=LONGEDGE`; `Duplex=None`→`OFF` (no BINDING line).
-`OCM_TonerSave` never appears in the envelope — it only changes pixels.
+`DUPLEX`/`BINDING` are not a plain option mapping — the vendor combines `Duplex=`, `sides=`
+and the raster header's own `Duplex`/`Tumble` fields, and names the edge from the page
+*orientation* (points wider than tall swaps the two names). The pair is resolved **once per
+job, from page 1**, and printed unchanged on every page. Full rule and the 256-case grid are
+in `docs/REVERSE-ENGINEERING.md` §4.2.1 and `docs/DEVICE-STREAM.md` §1; the two vendor quirks
+(`Duplex=` matched case-insensitively but `sides=` case-sensitively, and `sides=two-sided-long-edge`
+becoming `SHORTEDGE`) are reproduced deliberately. `RESOLUTION=600` and `MEDIATYPE=` come from
+the header, not the options. `OCM_TonerSave` never appears in the envelope — it only changes
+pixels.
 
 ### 7.2 Page geometry (`papers[]` in `src/encode.c`)
 
-The table is keyed on the raster header's **`PageSize` in points**, which is what the vendor
-actually uses: a real `pdftoraster` A4 page is 4961×7016 pixels and calls itself
-`A4.Borderless` (a name that is not in the PPD at all), and it still gets the A4 row. Points
-are tried first, `PageSizeName` second and the raster's pixel dimensions last;
-`tests/check-geometry.sh` pins all three levels. `PAPERWIDTH`/`PAPERLENGTH` are the PPD
-geometry at the (forced) 600 dpi, and the image is the raster cropped by one column and/or
-row depending on the paper. The full verified table (`PageSize` → PJL code → `pw, pl` →
-image `xd, yd`):
+The table is keyed **only** on the raster header's **`PageSize` in points**: a real
+`pdftoraster` A4 page is 4961×7016 pixels and calls itself `A4.Borderless` (a name that is not
+in the PPD at all), and it still gets the A4 row. `PageSizeName` and the raster's pixel
+dimensions are *not* consulted (that fallback was removed once the points rule was pinned).
+A point pair matches an entry in either orientation (`842×595` = `595×842`), and a pair that
+matches nothing becomes `PAPER=CUSTOM` (shorter side as the width) as long as the shorter side
+is 72..864 pt and the longer at most 1224 pt; outside that the vendor exits 2 with no output
+(the kit exits 1, also with no output, before writing anything).
+
+Each point count `pt` yields two pixel counts — published and encoded — by
+`base = floor(pt*600/72)`; `pub = base + (pt % 9 == 8)`, `enc = base − (pt % 9 ∈ {1,3,6})`.
+`tests/check-geometry.sh` pins the lookup, the custom bounds and the 600 dpi. The full
+verified table (`PageSize` points → PJL code → `pw, pl` → image `xd, yd`):
 
 | PageSize | PJL code | pw | pl | xd | yd |
 |---|---|---:|---:|---:|---:|
@@ -371,6 +387,12 @@ See [§8](#8-the-cmm-table-generator-in-detail).
 dot(x, y) = ( tone[x] >= screen[page_row % H][x % W] )     # unsigned compare
 ```
 
+* **1-bit rasters never enter this stage.** The vendor copies their bits straight into the
+  page image — bit set is ink — cropped to `Xd`×`Yd`, with the uncovered area dot-free and the
+  colour space ignored (`cs=0` and `cs=3` behave identically). Measured on A6 (`Xd` 2475,
+  `Yd` 3499): all-ink → 2475×3499 ink pixels, all-white → none, checker → half. `src/encode.c`
+  branches on `bits_per_pixel == 1` before the CMM; the corpus is all 8bpp, so the fuzzer is
+  what exercised this.
 * screen `H=W=96`, from **plane 0** of `COPA.DEFAULT.600x600.hft`
   (`.hft` = `tHsG` magic, version 5, record at `0x0c` → offset `0x44`, sub-header
   `{u16 w, u16 h}` at `0x48`, data at `0x4c`; 9216 bytes, values 1…255, none zero);
@@ -622,6 +644,12 @@ and `docs/ALPINE-PORT-STATUS.md` §7.2):
 `tests/check-geometry.sh` now covers the first gap directly. The second is documented rather
 than reproduced (it is uninitialised memory; see §7.6).
 
+Three further gaps were found by the differential fuzzer (`tests/fuzz-difftest.sh`) after the
+corpus and the real documents were already passing: the orientation-dependent
+`DUPLEX`/`BINDING` rule (resolved once per job, from page 1 — §7.1), the 1bpp pass-through
+(§7.5), and the point→pixel conversion for sizes that are not in the table (§7.2). Each is now
+pinned by a test, and the fuzzer classifies heap-dependent vendor output separately (§12.5).
+
 ---
 
 ## 12. Known limitations / what is *not* verified
@@ -629,8 +657,9 @@ than reproduced (it is uninitialised memory; see §7.6).
 Honest statement of scope:
 
 1. **Paper sizes, raster formats and option combinations absent from the corpus** are handled
-   by the model but not exercised end-to-end. The filter path converts only 8-bit and 1-bit
-   grey (`to_gray`); the corpus exercises 8-bit grey only.
+   by the model but not exercised end-to-end by the *corpus*; the fuzzer and the real-document
+   test cover many of them. The filter path converts 8-bit and 1-bit rasters (1bpp bypasses
+   the CMM and the halftone entirely — §7.5); the corpus itself exercises 8-bit grey only.
 2. **Non-600 dpi** resolutions are not exercised (`1200x600.hft` exists and has a 192×96
    plane 0, but only the 600×600 path is tested). The vendor forces `RESOLUTION=600` whatever
    the raster says (verified), so this is a fidelity limit of the device path, not of the kit.
@@ -639,9 +668,13 @@ Honest statement of scope:
    vendor set.
 4. **CUPS/printer installation** is not attempted — the kit is a stream generator, tested
    offline. `docs/ALPINE.md` describes the install/rollback plan but marks it untested.
-5. **The 0–3 BIE pad bytes** after the final SDNORM are not reproduced (the vendor writes
-   uninitialised heap there; see §7.6). They are outside the decoded image. This is the only
-   known byte-level difference from the vendor on a real document.
+5. **Two places where the vendor reads uninitialised heap** are deliberately not reproduced,
+   because no deterministic filter can: (a) the 0–3 BIE pad bytes after the final SDNORM
+   (§7.6); (b) when a raster row is not a multiple of 4 bytes, the byte just past the row,
+   which the CMM's right-edge window reads, changing the page's **last column**. In both cases
+   the vendor's own output moves with `MALLOC_PERTURB_`; the kit writes deterministic zeros,
+   `tools/prnscan.py padcmp` masks the pad bytes, and `tests/fuzz-difftest.sh` reports a case
+   whose vendor output is heap-dependent as vendor-nondeterministic rather than divergent.
 
 There are **no known correctness gaps** inside the tested scope: every byte of every corpus
 stream is reproduced, and 2 of the 3 real documents are byte-identical end-to-end.
@@ -681,7 +714,8 @@ value:
 
 1. **Broaden the corpus** to cover the gaps in §12 (other resolutions, 1-bit and colour
    rasters through the *filter*, more duplex bindings) using `tools/capture-corpus.sh`
-   against the vendor filter, then re-run `difftest.sh`.
+   against the vendor filter, then re-run `difftest.sh`. The fuzzer already explores these
+   axes; promoting its interesting seeds into the corpus would make them permanent.
 2. **Portability**: the model assumes IEEE binary32 `float`. If a 32-bit x87 target ever
    mattered, the generator would need explicit rounding control.
 3. **Packaging**: a distro-ready `install` target and the Alpine CUPS integration described

@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static const char *opt_value(const char *opts, const char *key, char *buf, size_t n)
 {
@@ -30,16 +31,23 @@ static void parse_job(job_t *j, const char *opts)
 {
     char v[64];
     j->options = opts;
-    j->duplex = 0;
+    j->duplex_opt = 0;
     if (opt_value(opts, "Duplex", v, sizeof v)) {
-        if (!strcmp(v, "DuplexNoTumble")) j->duplex = 1;
-        else if (!strcmp(v, "DuplexTumble")) j->duplex = 2;
+        if (!strcasecmp(v, "DuplexNoTumble")) j->duplex_opt = 2;
+        else if (!strcasecmp(v, "DuplexTumble")) j->duplex_opt = 3;
+        else j->duplex_opt = 1;              /* None, Foo, ... : not a duplex mode */
+    }
+    j->sides = 0;
+    if (opt_value(opts, "sides", v, sizeof v)) {
+        if (!strcmp(v, "two-sided-long-edge")) j->sides = 2;
+        else if (!strcmp(v, "two-sided-short-edge")) j->sides = 3;
     }
     /* OCM_TonerSave resolves to TRUE when the option is absent. Corpus-proven: case 005
      * (option absent) is byte-identical to case 034 (OCM_TonerSave=TRUE), while 035
      * (=FALSE) differs. Toner save changes only the tone baseline, not the halftone
      * neighbourhood stage, so absent -> TRUE is safe for byte-exactness. */
     j->toner_save = opt_value(opts, "OCM_TonerSave", v, sizeof v) ? !strcmp(v, "TRUE") : 1;
+    j->dup_known = 0;                        /* enc_page() fixes DUPLEX/BINDING on page 1 */
 }
 
 static int dump(FILE *in)
@@ -93,12 +101,20 @@ int main(int argc, char **argv)
     if (!res) return 1;
 
     sink_t out = { stdout, 0 };
+
+    /* Resolve the first page's size before writing anything: a size the vendor does not
+     * support fails the whole job with an empty stream, not a truncated PJL header. */
+    ras_hdr_t h;
+    int rc = ras_next_page(r, &h);
+    if (rc < 0) { fprintf(stderr, "ERROR: bad page header\n"); enc_close(res); return 1; }
+    if (rc == 1 && !enc_page_size_ok(&h)) { enc_close(res); return 1; }
+
     if (enc_job_begin(&out, &job)) { enc_close(res); return 1; }
 
-    ras_hdr_t h;
-    int rc;
-    while ((rc = ras_next_page(r, &h)) == 1)
+    while (rc == 1) {
         if (enc_page(&out, &job, res, &h, r)) { enc_close(res); return 1; }
+        rc = ras_next_page(r, &h);
+    }
     if (rc < 0) { fprintf(stderr, "ERROR: bad page header\n"); enc_close(res); return 1; }
 
     if (enc_job_end(&out, &job)) { enc_close(res); return 1; }

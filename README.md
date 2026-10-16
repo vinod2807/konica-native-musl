@@ -31,21 +31,34 @@ make
 ## Test
 
 ```sh
-make check-reader                                  # reader vs libcups: 27/27
-make check-geometry                                # geometry keying + forced 600 dpi: 6/6
-make check-lutgen                                  # regenerated CMM table vs the vendor's
-tests/difftest.sh /path/to/konica-corpus
+make check                # reader, CMM table, geometry, MEDIATYPE, hardening — no vendor needed
+make check-reader         # reader vs libcups: 27/27
+make check-lutgen         # regenerated CMM table vs the vendor's
+make check-geometry       # points -> size -> pixels, CUSTOM bounds, forced 600 dpi
+make check-mediatype      # PJL MEDIATYPE table (golden, vendor-free)
+make check-errors         # a broken runtime install must fail with nothing on stdout
+make check-determinism    # CORPUS=...: same raster twice, once with MALLOC_PERTURB_
+make check-difftest       # CORPUS=...: byte-exact against the captured corpus
+make check-real           # real PDFs through pdftopdf + pdftoraster
+make check-fuzz           # randomised differential fuzzing (FUZZ_CASES, FUZZ_SEED)
+make check-asan           # AddressSanitizer + UBSan build over the vendor-free tests
 ```
+
+`make check` needs neither the vendor filter nor a corpus. The tests that compare against
+the vendor need it installed (and a readable PPD); `CORPUS=` points the corpus tests at a
+captured corpus.
 
 The differential test reproduces the vendor filter's captured output byte-for-byte:
 `PASS: 60   FAIL: 0` (verified on glibc and on Alpine/musl). It needs no captured
 table: the colour-management table is regenerated from the installed ICC profiles.
 
-All of them at once:
-
-```sh
-make check
-```
+The fuzzer generates rasters that vary along the axes where defects actually lived — raster
+version, page size in points vs the page-size *name*, dpi, bit depth, pages of mixed
+geometry — and diffs both filters. It found the orientation-dependent `DUPLEX`/`BINDING`
+rule (which the vendor resolves once per job, from page 1), the 1bpp pass-through, and the
+point→pixel conversion for sizes outside the table. A case whose *vendor* output moves under
+`MALLOC_PERTURB_` is reported as vendor-nondeterministic instead of divergent: the vendor
+reads uninitialised heap there, so no deterministic filter can match it.
 
 ## Runtime data
 

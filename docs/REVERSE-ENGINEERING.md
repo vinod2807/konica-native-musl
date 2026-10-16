@@ -191,48 +191,107 @@ Notes:
 
 | CUPS option | PJL |
 |---|---|
-| `Duplex=None` | `DUPLEX=OFF` (no `BINDING` line) |
-| `Duplex=DuplexNoTumble` (long edge) | `DUPLEX=ON` + `BINDING=SHORTEDGE` |
-| `Duplex=DuplexTumble` (short edge) | `DUPLEX=ON` + `BINDING=LONGEDGE` |
-| `Resolution` | `RESOLUTION=<dpi>` |
-| `MediaType=Plain` | `MEDIATYPE=PLAIN` + fixed `MEDIASOURCE=AUTO` |
-| `PageSize` | `PAPER=<code>` + `PAPERWIDTH` + `PAPERLENGTH` (table below) |
+| `Resolution` | *(ignored)*: `RESOLUTION=600` always, because the device is 600 dpi |
+| `MediaType=` | *(ignored)*: `MEDIATYPE=` comes from the raster header's `MediaType` string |
+| `PageSize=` | *(ignored)*: `PAPER`/`PAPERWIDTH`/`PAPERLENGTH` come from the header's points (§4.3) |
+| `Duplex=` / `sides=` | `DUPLEX`/`BINDING` per §4.2.1 |
+
+#### 4.2.1 DUPLEX / BINDING (solved 2026-10-16)
+
+Not a simple option mapping. The vendor combines `Duplex=`, `sides=` and the raster header's
+own `Duplex` (file offset 276) and `Tumble` (offset 372) fields, and names the edge from the
+*page orientation*: `landscape = page_size[0] > page_size[1]` in points. Measured against the
+running filter over a 256-combination grid (header `Duplex` ∈ {0,1,2,3} × header `Tumble` ∈
+{0,1} × portrait/landscape × `Duplex=` ∈ {absent, None, NoTumble, Tumble} × `sides=` ∈
+{absent, one-sided, two-sided-long-edge, two-sided-short-edge}), then re-confirmed on the
+built binary with 576 cases.
+
+The pair is resolved **once per job, from page 1**, and printed unchanged on every page: a
+two-page job whose pages differ in orientation (`595×842` then `842×595`) or in their header
+`Duplex`/`Tumble` fields still gets one pair (verified 2026-10-16 — this is what seed 2008 of
+the fuzzer caught, where page 2 was portrait but carried page 1's `LONGEDGE`).
+
+`DUPLEX` is `ON` when:
+
+| | |
+|---|---|
+| `Duplex=` present, case-insensitively `DuplexNoTumble` or `DuplexTumble` | always |
+| `Duplex=` present, anything else (`None`, `none`, `Foo`, …) | header `Duplex != 0` |
+| `Duplex=` absent | header `Duplex != 0` **or** `sides=` is exactly `two-sided-long-edge` / `two-sided-short-edge` |
+
+With `DUPLEX=ON`, `BINDING = tumble ^ landscape ? LONGEDGE : SHORTEDGE`, where `tumble` is:
+
+| | |
+|---|---|
+| `Duplex=` case-insensitively `DuplexNoTumble` | 0 |
+| `Duplex=` case-insensitively `DuplexTumble` | 1 |
+| `Duplex=` present but neither (e.g. `None`) | header `Tumble != 0` |
+| `Duplex=` absent, `sides=two-sided-long-edge` | 0 |
+| `Duplex=` absent, `sides=two-sided-short-edge` | 1 |
+| `Duplex=` absent, otherwise | header `Tumble != 0` |
+
+Quirks, reproduced faithfully (they are vendor bugs):
+
+* `Duplex=` is matched **case-insensitively** (`duplexnotumble` works) while `sides=` is
+  matched **case-sensitively** (`TWO-SIDED-SHORT-EDGE` does nothing); `sides=two-sided`
+  alone does nothing either.
+* A *present* `Duplex=` suppresses the `sides=` binding rule even when its value is `None`.
+* `sides=two-sided-long-edge` becomes `SHORTEDGE` and `sides=two-sided-short-edge` becomes
+  `LONGEDGE` — the opposite of CUPS' naming.
+
+Implemented as `duplex_binding()` in `src/encode.c`; the options are parsed into `job_t`
+(`duplex_opt`, `sides`) by `parse_job()` in `src/main.c`.
 
 ### 4.3 Page-size table (600 dpi path)
 
-`PAPERWIDTH` = `rasW` always. `PAPERLENGTH`, and the image dimensions `Xd`/`Yd` that go
-into the JBIG header, are **not** a clean function of the raster size (off-by-one varies
-per paper) — reproduced exactly from the corpus:
+`PAPER`, `PAPERWIDTH`, `PAPERLENGTH` and the image dimensions `Xd`/`Yd` are all derived from
+the raster header's `PageSize[2]` **in points** — not from the `PageSize=` option, not from
+`PageSizeName`, and not from the pixel dimensions. A point pair matches an entry in **either
+orientation** (`842×595` picks `A4` just like `595×842`). For one dimension of `pt` points:
 
-| `page_size_name` | PJL `PAPER` | PAPERWIDTH | PAPERLENGTH | image Xd | image Yd |
-|---|---|---|---|---|---|
-| `16K` | `MLTM16K` | 4608 | 6375 | 4608 | 6375 |
-| `8K` | `MLTM8K` | 6308 | 9166 | 6307 | 9166 |
-| `A3` | `A3` | 7016 | 9925 | 7016 | 9924 |
-| `A4` | `A4` | 4958 | 7016 | 4957 | 7016 |
-| `A5` | `A5` | 3500 | 4958 | 3499 | 4957 |
-| `A6` | `A6` | 2475 | 3500 | 2475 | 3499 |
-| `B4` | `JISB4` | 6075 | 8600 | 6075 | 8599 |
-| `B5` | `JISB5` | 4300 | 6075 | 4299 | 6075 |
-| `B6` | `JISB6` | 3025 | 4300 | 3024 | 4299 |
-| `Comm10` | `COM10` | 2475 | 5700 | 2475 | 5700 |
-| `EnvC6` | `C63OF4` | 2692 | 3825 | 2691 | 3825 |
-| `EnvDL` | `ENVDL` | 2600 | 5200 | 2599 | 5199 |
-| `EnvPersonal` | `C6ENV` | 2175 | 3900 | 2175 | 3900 |
-| `Executive` | `EXECUTIVE` | 4350 | 6300 | 4350 | 6300 |
-| `FabFoldGermanLegal` | `FLS3` | 5100 | 7792 | 5100 | 7791 |
-| `FLS_220X330` | `FLS4` | 5200 | 7792 | 5199 | 7791 |
-| `FLS_8D125X13D25` | `FLS5` | 4867 | 7958 | 4866 | 7957 |
-| `FLS_8D25X13` | `FLS2` | 4958 | 7792 | 4957 | 7791 |
-| `FLS_8D5X13D5` | `FLS6` | 5100 | 8100 | 5100 | 8100 |
-| `FLS_8X13` | `FLS1` | 4792 | 7792 | 4791 | 7791 |
-| `Legal` | `LEGAL` | 5100 | 8400 | 5100 | 8400 |
-| `Letter` | `LETTER` | 5100 | 6600 | 5100 | 6600 |
-| `Statement` | `INVOICE` | 3300 | 5100 | 3300 | 5100 |
-| `Tabloid` | `LEDGER` | 6600 | 10200 | 6600 | 10200 |
+```
+base = floor(pt * 600 / 72)          exact in integers: pt * 25 / 3
+pub  = base + (pt % 9 == 8)          PAPERWIDTH / PAPERLENGTH
+enc  = base - (pt % 9 in {1,3,6})    Xd / Yd
+```
 
-`page_size_name` is read from the raster header (offset 1732 in the v3 header).
-Implemented in `src/encode.c` as `struct paper papers[]`.
+That one rule reproduces every number in the table below (24 entries, 96 numbers) and a
+69-point sweep of custom sizes (72..140). A pair matching no entry becomes `PAPER=CUSTOM`
+with the shorter side as the width; the vendor accepts such a page only while the shorter
+side is 72..864 points and the longer side at most 1224 points, and otherwise exits 2 having
+written nothing (the kit refuses it with exit 1 and an empty stdout). Implemented as
+`dim_from_points()` / `page_geometry()` in `src/encode.c`.
+
+| size (points) | PPD name | PJL `PAPER` | PAPERWIDTH | PAPERLENGTH | image Xd | image Yd |
+|---|---|---|---|---|---|---|
+| 553×765 | `16K` | `MLTM16K` | 4608 | 6375 | 4608 | 6375 |
+| 757×1100 | `8K` | `MLTM8K` | 6308 | 9166 | 6307 | 9166 |
+| 842×1191 | `A3` | `A3` | 7016 | 9925 | 7016 | 9924 |
+| 595×842 | `A4` | `A4` | 4958 | 7016 | 4957 | 7016 |
+| 420×595 | `A5` | `A5` | 3500 | 4958 | 3499 | 4957 |
+| 297×420 | `A6` | `A6` | 2475 | 3500 | 2475 | 3499 |
+| 729×1032 | `B4` | `JISB4` | 6075 | 8600 | 6075 | 8599 |
+| 516×729 | `B5` | `JISB5` | 4300 | 6075 | 4299 | 6075 |
+| 363×516 | `B6` | `JISB6` | 3025 | 4300 | 3024 | 4299 |
+| 297×684 | `Comm10` | `COM10` | 2475 | 5700 | 2475 | 5700 |
+| 323×459 | `EnvC6` | `C63OF4` | 2692 | 3825 | 2691 | 3825 |
+| 312×624 | `EnvDL` | `ENVDL` | 2600 | 5200 | 2599 | 5199 |
+| 261×468 | `EnvPersonal` | `C6ENV` | 2175 | 3900 | 2175 | 3900 |
+| 522×756 | `Executive` | `EXECUTIVE` | 4350 | 6300 | 4350 | 6300 |
+| 612×935 | `FabFoldGermanLegal` | `FLS3` | 5100 | 7792 | 5100 | 7791 |
+| 624×935 | `FLS_220X330` | `FLS4` | 5200 | 7792 | 5199 | 7791 |
+| 584×955 | `FLS_8D125X13D25` | `FLS5` | 4867 | 7958 | 4866 | 7957 |
+| 595×935 | `FLS_8D25X13` | `FLS2` | 4958 | 7792 | 4957 | 7791 |
+| 612×972 | `FLS_8D5X13D5` | `FLS6` | 5100 | 8100 | 5100 | 8100 |
+| 575×935 | `FLS_8X13` | `FLS1` | 4792 | 7792 | 4791 | 7791 |
+| 612×1008 | `Legal` | `LEGAL` | 5100 | 8400 | 5100 | 8400 |
+| 612×792 | `Letter` | `LETTER` | 5100 | 6600 | 5100 | 6600 |
+| 396×612 | `Statement` | `INVOICE` | 3300 | 5100 | 3300 | 5100 |
+| 792×1224 | `Tabloid` | `LEDGER` | 6600 | 10200 | 6600 | 10200 |
+
+The PPD names are listed only for orientation: the vendor never reads them (a real
+`pdftoraster` A4 page calls itself `A4.Borderless`, a name absent from the PPD, and still
+selects `A4`). Implemented in `src/encode.c` as `struct paper papers[]` keyed by points.
 
 ### 4.4 Worked example — 001-simplex-blank (full stream)
 
@@ -329,6 +388,14 @@ that everything except the non-uniform halftone is correct.
 
 The filter maps each 8-bit gray sample (0 = black, 255 = white) to one output bit through
 the `COPA` screen, then JBIG-encodes.
+
+**1-bit rasters never enter this stage.** They are copied bit-for-bit into the page image —
+bit set is ink — cropped to `Xd`×`Yd`, with the uncovered area left dot-free and the colour
+space ignored (`cs=0` and `cs=3` behave identically). Measured on A6 (`Xd` 2475, `Yd` 3499):
+all-ink → exactly 2475×3499 ink pixels, all-white → none, checker → half, and a rectangle
+drawn in the raster lands on the same pixels. So the tone rule below applies to 8bpp only.
+Implemented as a separate branch of `enc_page()` in `src/encode.c`. The corpus is all 8bpp;
+the differential fuzzer (`tests/fuzz-difftest.sh`) found this on 2026-10-16.
 
 ### 6.1 The screen file format — SOLVED
 
@@ -683,6 +750,20 @@ wrap bytes are *not* the next page row:
 * otherwise `0,0`.
 
 **Missing raster rows** (past the page height) are all-zero, i.e. black.
+
+**The pad byte is not always zero.** The vendor writes only `bytes_per_line` bytes into each
+row of that buffer and never touches `bytes_per_line..S-1`. In a fresh (mmap'd, zero) buffer
+that region reads as zero, which is what our model assumes, and what the corpus and the real
+documents show. But when the buffer is recycled — and in a multi-page job it is — the byte
+just past the row holds whatever the previous occupant left there, and the CMM's right-edge
+window reads it, so the **last column** of the page changes. Measured on fuzzer seed 2002
+(page 2, width 2691, `S` 2692): all 1157 differing bits sit in column `Xd-1 = 2690`, and the
+vendor's own output moves with the allocator's fill pattern (`MALLOC_PERTURB_` = 0/1/85/170
+gives 225616/223567/223151/225720 bytes). The vendor is therefore *not deterministic* there
+and no filter can match it byte-for-byte. `src/encode.c` keeps writing zeros (deterministic by
+construction, `tests/check-determinism.sh`), and `tests/fuzz-difftest.sh` classifies a case
+whose vendor output moves under `MALLOC_PERTURB_` as vendor-nondeterministic rather than
+failing it.
 
 ### 9.3 `OCM_TonerSave` — proven
 

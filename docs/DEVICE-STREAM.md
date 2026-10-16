@@ -47,12 +47,42 @@ Mapping (from `manifest.tsv` + captures):
 
 | CUPS option | PJL |
 |---|---|
-| `Duplex=DuplexNoTumble` (long edge) | `DUPLEX=ON` + `BINDING=SHORTEDGE` |
-| `Duplex=DuplexTumble` (short edge) | `DUPLEX=ON` + `BINDING=LONGEDGE` |
-| `Duplex=None` | `DUPLEX=OFF` (no BINDING line) |
-| `PageSize` | `PAPER=<code>` (see table) |
-| *(raster HWResolution is ignored)* | `RESOLUTION=600` always |
-| `MediaType=Plain` | `MEDIATYPE=PLAIN`, `MEDIASOURCE=AUTO` |
+| `PageSize=` | *(ignored)*: `PAPER`/`PAPERWIDTH`/`PAPERLENGTH` come from the header's points |
+| `Resolution=` | *(ignored)*: `RESOLUTION=600` always |
+| `MediaType=` | *(ignored)*: `MEDIATYPE=` comes from the header's `MediaType` string |
+| *(fixed)* | `MEDIASOURCE=AUTO` |
+
+`DUPLEX`/`BINDING` are **not** simply the `Duplex=` option: the vendor combines that option
+with the raster header's own `Duplex` and `Tumble` fields and with `sides=`, and it names the
+edge from the *page orientation* — a landscape page (points wider than tall) swaps
+`SHORTEDGE` and `LONGEDGE`. Measured against the running filter over a 256-combination grid
+of header fields × option spellings (see `docs/REVERSE-ENGINEERING.md`):
+
+The pair is resolved **once per job, from the first page**, and the same `DUPLEX`/`BINDING`
+lines are printed on every page: a two-page job whose pages differ in orientation, or in
+their header `Duplex`/`Tumble` fields, still gets one pair, derived from page 1.
+
+| `DUPLEX` is ON when | |
+|---|---|
+| `Duplex=` present and case-insensitively `DuplexNoTumble`/`DuplexTumble` | always ON |
+| `Duplex=` present but anything else (`None`, `none`, `Foo`, …) | header `Duplex != 0` |
+| `Duplex=` absent | header `Duplex != 0` **or** `sides=` is exactly `two-sided-long-edge`/`two-sided-short-edge` |
+
+`BINDING` (emitted only with `DUPLEX=ON`) is `LONGEDGE` when `tumble ^ landscape`, else
+`SHORTEDGE`, where `tumble` is:
+
+| `tumble` | |
+|---|---|
+| `Duplex=` case-insensitively `DuplexNoTumble` | 0 |
+| `Duplex=` case-insensitively `DuplexTumble` | 1 |
+| `Duplex=` present but neither (e.g. `None`) | header `Tumble != 0` |
+| `Duplex=` absent, `sides=two-sided-long-edge` | 0 |
+| `Duplex=` absent, `sides=two-sided-short-edge` | 1 |
+| `Duplex=` absent, otherwise | header `Tumble != 0` |
+
+Two vendor quirks are reproduced faithfully: `Duplex=` is matched **case-insensitively** while
+`sides=` is matched **case-sensitively**, and `sides=two-sided-long-edge` becomes `SHORTEDGE`
+(the opposite of CUPS' naming).
 
 `RESOLUTION` is **not** derived from the raster: rewriting a raster's `HWResolution` to 300
 or 1200 dpi still yields a byte-identical stream with `RESOLUTION=600`, because the device is
@@ -63,11 +93,21 @@ in points**, not on the `PageSize=` option, not on `PageSizeName` and not on the
 pixel dimensions (verified by rewriting those fields one at a time and re-running the vendor
 filter). This is why a real `pdftoraster` A4 page — 4961×7016 pixels, self-described as
 `A4.Borderless`, a name absent from the PPD — still yields the A4 entry: `4958/7016` with a
-`4957×7016` image, exactly as the corpus A4 raster (4958×7017, name `A4`) does. The lookup
-order is points → `PageSizeName` → pixel dimensions; `tests/check-geometry.sh` pins all three.
-The per-size values used by the 600 dpi path are tabulated in `src/encode.c` (`papers[]`,
-keyed by `px`/`py` points). `PAPER=<code>` is a Konica-internal name (`A4`, `A3`, `MLTM16K`,
-`JISB4`, `C63OF4`, `COM10`, `FLS3`, …).
+`4957×7016` image, exactly as the corpus A4 raster (4958×7017, name `A4`) does.
+
+The point pair selects a table entry by matching **either orientation** (`842×595` picks the
+same entry as `595×842`). A pair that matches nothing becomes `PAPER=CUSTOM` with the shorter
+side as the width; the vendor accepts a custom page only while the shorter side is 72..864
+points and the longer side at most 1224 points, and otherwise exits 2 having written nothing
+(the kit refuses it with exit 1 and an empty stdout). Each point count becomes two pixel
+counts — the published `PAPERWIDTH`/`PAPERLENGTH` and the encoded BIH `Xd`/`Yd` — and they are
+not a plain `points*600/72`: with `base = floor(points*600/72)` the published value is
+`base + (points % 9 == 8)` and the encoded value is `base - (points % 9 ∈ {1,3,6})`. That
+reproduces all 24 `papers[]` entries (96 numbers) and a 69-point sweep of custom sizes
+(`src/encode.c: dim_from_points()`). `tests/check-geometry.sh` pins the whole lookup.
+
+`PAPER=<code>` is a Konica-internal name (`A4`, `A3`, `MLTM16K`, `JISB4`, `C63OF4`, `COM10`,
+`FLS3`, …).
 
 `OCM_TonerSave` never appears in the envelope; it only changes page pixels. The
 corpus confirms that **absent behaves as TRUE** (identical stream to `OCM_TonerSave=TRUE`).
@@ -128,6 +168,15 @@ byte-for-byte when fed the vendor's own 1-bit image (`tests/difftest.sh`).
 
 The filter maps each 8-bit gray sample to one output bit through the `COPA` screen.
 
+**1-bit rasters do not go through this pipeline at all.** The vendor copies a 1bpp raster's
+bits straight into the page image — bit set is ink — cropped to `Xd`×`Yd`, leaving everything
+the raster does not cover dot-free and ignoring the raster's colour space (`cs=0` and `cs=3`
+behave identically). Measured on A6 (`Xd` 2475, `Yd` 3499): an all-ink 1bpp raster yields
+exactly 2475×3499 ink pixels, an all-white one yields none, a checker yields half, and a
+rectangle drawn in the raster lands on the same pixels. `src/encode.c` has a separate path for
+this; the corpus is all 8bpp, so only the differential fuzzer (`tests/fuzz-difftest.sh`)
+exercised it.
+
 * The screen file is `Halftones/COPA.DEFAULT.600x600.hft`. It is a small header plus
   five planes; **plane 0** is the 96×96 threshold array the 600×600 path uses
   (values 1..255). (`1200x600.hft` has a 192×96 plane 0.)
@@ -172,6 +221,14 @@ The corpus is all v2/RLE rasters built from the PPD, so it exercises neither rea
 `pdftoraster` headers (v3, `A4.Borderless`, 4961×7016) nor BIE padding: every one of its 60
 page streams is already a multiple of 4 bytes. Real-document runs found both gaps — see
 `docs/ALPINE-PORT-STATUS.md` §7.2 and `tests/check-geometry.sh`.
+
+Three more gaps were found by the differential fuzzer (`tests/fuzz-difftest.sh`), which
+generates rasters varying version, dpi, bit depth, page size vs. size name and content, and
+diffs both filters: the orientation-dependent `DUPLEX`/`BINDING` rule, the 1bpp pass-through,
+and the point→pixel conversion for sizes that are not in the table. `tests/real-docs.sh` runs
+whole PDFs through the real `pdftopdf`+`pdftoraster` chain, `tests/check-mediatype.sh` and
+`tests/check-errors.sh` need no vendor filter, and `tests/check-determinism.sh` re-runs a
+corpus with `MALLOC_PERTURB_` set.
 
 Runtime data (screen + ICC profiles) is loaded in `enc_open()` before the first byte reaches
 stdout. If it cannot be read the filter exits non-zero with **nothing on stdout**; the old

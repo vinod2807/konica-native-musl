@@ -1,8 +1,13 @@
 # build artifacts
 /konica-native
+/konica-native-asan
 /tests/libcups_dump
 /tools/mkraster
 /tools/lutgen-dump
+/tools/biedec
+
+# fuzzer scratch (regenerated on demand)
+/fuzz-failures/
 
 # editor / OS noise
 *.o

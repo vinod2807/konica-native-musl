@@ -7,6 +7,7 @@ MKR=${MKRASTER:-$HERE/tools/mkraster}
 [ -x "$MKR" ] || cc -O2 -Wno-deprecated-declarations -o "$MKR" "$HERE/tools/mkraster.c" -lcups || exit 2
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 fail=0
+BIN=${NATIVE:-$HERE/konica-native}
 
 # Rewrite an uncompressed (v3) stream as v1: "RaSt" sync, 420-byte headers, same pixels.
 to_v1() {
@@ -27,7 +28,7 @@ t() { # name, mkraster args...
     name=$1; shift
     "$MKR" "$@" > "$T/in.ras" 2>/dev/null || { echo "SKIP $name (mkraster)"; return; }
     case $name in *-v1) to_v1 "$T/in.ras" "$T/v1.ras" && mv "$T/v1.ras" "$T/in.ras" ;; esac
-    "$HERE/konica-native" --dump "$T/in.ras" > "$T/ours" 2>&1
+    "$BIN" --dump "$T/in.ras" > "$T/ours" 2>&1
     "$HERE/tests/libcups_dump" "$T/in.ras" > "$T/ref" 2>&1
     if cmp -s "$T/ours" "$T/ref" && [ -s "$T/ref" ]; then echo "PASS $name"; else
         echo "FAIL $name"; diff "$T/ours" "$T/ref" | head -4; fail=1; fi
