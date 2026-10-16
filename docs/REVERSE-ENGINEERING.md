@@ -185,7 +185,10 @@ Input rasters are **CUPS raster v2 (RLE)**, 8-bit grayscale, colorspace
 Notes:
 * Every PJL line ends with `\r\n`.
 * The fixed job header (`COMPRESS…COPIES`) is emitted **once**, not per page.
-* `COPIES=1` always in the corpus (the option set never changed copies).
+* `COPIES=1` always in the corpus (the option set never changed copies). The vendor **ignores
+  argv[4]** (the CUPS copies argument): driving the same raster with copies `1`, `2` and `5`
+  yields byte-identical streams, so hard-coding `COPIES=1` — as this kit does — is faithful, not
+  a gap.
 
 ### 4.2 Option → PJL mapping
 

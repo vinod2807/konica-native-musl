@@ -326,6 +326,7 @@ Option mapping (full rule in `docs/REVERSE-ENGINEERING.md` §4.2.1):
 | `PageSize` | *(ignored)*: `PAPER`/`PAPERWIDTH`/`PAPERLENGTH` come from the header's points |
 | `Resolution` | *(ignored)*: `RESOLUTION=600` always (the device's dpi) |
 | `MediaType=` | *(ignored)*: `MEDIATYPE=` comes from the header's `MediaType` string; `MEDIASOURCE=AUTO` fixed |
+| `argv[4]` (copies) | *(ignored)*: `COPIES=1` always — the vendor ignores CUPS's copies argument (copies `1`/`2`/`5` → byte-identical streams) |
 
 `OCM_TonerSave` never appears in the envelope — it only changes page pixels.
 

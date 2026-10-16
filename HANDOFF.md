@@ -269,7 +269,8 @@ main → enc_job_begin
 @PJL SET COPIES=1\r\n
 ```
 
-Once per page:
+`COPIES=1` is fixed: the vendor ignores CUPS's copies argument (`argv[4]` — copies `1`, `2` and
+`5` give byte-identical streams), so the kit hard-codes it too. Once per page:
 
 ```
 @PJL SET PAGESTATUS=START\r\n
@@ -680,7 +681,9 @@ Honest statement of scope:
    whose vendor output is heap-dependent as vendor-nondeterministic rather than divergent.
 
 There are **no known correctness gaps** inside the tested scope: every byte of every corpus
-stream is reproduced, and 2 of the 3 real documents are byte-identical end-to-end.
+stream is reproduced, 2 of the 3 real documents are byte-identical end-to-end (the third differs
+only in never-decoded pad bytes, §12.5), and the vendor's copies argument is verified ignored
+(`COPIES=1` is faithful, not a gap).
 
 ---
 
@@ -689,9 +692,11 @@ stream is reproduced, and 2 of the 3 real documents are byte-identical end-to-en
 * The repo lives at `/home/spot/Downloads/konica-native-musl`; the corpus at
   `/root/konica-corpus-full`.
 * The vendor tree is under `/usr/local/lib/konica/KonicaMinolta/245igdi/`.
-* A **musl test rootfs** is available at
-  `/initrd/mnt/tmpfs/tmp/opencode/alpine/rootfs` (Alpine 3.24.2). It already contains
-  `/corpus`, the vendor profiles and the `.hft`. Build and test with:
+* A **musl test rootfs** was used at `/initrd/mnt/tmpfs/tmp/opencode/alpine/rootfs`
+  (Alpine 3.24.2) but **has since been removed**; recreate it from
+  `alpine-minirootfs-3.24.2-x86_64.tar.gz` as in `docs/ALPINE-PORT-STATUS.md` §2 before running
+  the musl column again. When it existed it held `/corpus`, the vendor profiles and the `.hft`.
+  Build and test with:
 
   ```sh
   R=/initrd/mnt/tmpfs/tmp/opencode/alpine/rootfs

@@ -22,7 +22,9 @@ The job is a sequence of PJL lines, `\r\n`-terminated, wrapped in a UEL.
 @PJL SET COPIES=1\r\n
 ```
 
-`COMPRESS..COPIES` occur **once per job**. Each page then repeats:
+`COMPRESS..COPIES` occur **once per job**. `COPIES=1` is fixed: the vendor ignores CUPS's copies
+argument (`argv[4]`) — copies `1`, `2` and `5` all produce byte-identical streams — so this kit
+hard-codes `COPIES=1` too. Each page then repeats:
 
 ```
 @PJL SET PAGESTATUS=START\r\n

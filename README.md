@@ -48,6 +48,20 @@ make check-asan           # AddressSanitizer + UBSan build over the vendor-free 
 the vendor need it installed (and a readable PPD); `CORPUS=` points the corpus tests at a
 captured corpus.
 
+To compare a real document by hand — and keep the raster so a second machine can re-check it —
+use `tools/compare-real.sh` on the host where the vendor filter runs:
+
+```sh
+PPD=/var/lib/legacy-printer-app/ppd/KonicaMinolta-206-fullbleed.ppd
+tools/compare-real.sh mydoc.pdf "$PPD" ./real-compare   # writes .ras/.opts/.vendor.prn/.native.prn
+tools/verify-on-target.sh ./real-compare ./konica-native # re-check the captured rasters anywhere
+```
+
+`compare-real.sh` runs `pdftopdf` → `pdftoraster` → both filters and compares; `PASS` means
+byte-identical or differing only in the never-decoded BIE pad bytes (`prnscan.py padcmp`). A
+non-default `OPTS` is folded into the output stem so two option sets on the same PDF (e.g. long-
+vs short-edge duplex) do not overwrite each other. Nothing is ever sent to a printer.
+
 The differential test reproduces the vendor filter's captured output byte-for-byte:
 `PASS: 60   FAIL: 0` (verified on glibc and on Alpine/musl). It needs no captured
 table: the colour-management table is regenerated from the installed ICC profiles.
@@ -96,7 +110,8 @@ src/halftone.c    .hft screen loader + per-pixel dot rule
 src/jbig.c        self-contained JBIG1 encoder
 src/raster.c      pure-libc CUPS raster reader (v1 / v2-RLE / v3)
 docs/             format spec and full reverse-engineering notes
-tools/            corpus capture, LUT dump recipe, raster generator, stream scanner
+tools/            corpus capture, LUT dump recipe, raster generator, stream scanner,
+                  real-document comparison (compare-real.sh, verify-on-target.sh)
 tests/            differential + reader cross-check harnesses
 ```
 

@@ -4,7 +4,7 @@ Report for the OpenCode task brief (finish + port the Konica Minolta bizhub 206 
 driver to Alpine/musl). This file records the **environment, exact commands, and results**
 for Phases 1–2, and separates PASS / FAIL / SKIP / BLOCKED / NOT RUN.
 
-_Last updated: 2026-10-15._
+_Last updated: 2026-10-16._
 
 ## 1. Repository / baseline facts
 
@@ -222,6 +222,13 @@ serves with `mmap` (freshly zeroed pages), and there the vendor's pad bytes are 
 though stale bytes were available. Reproducing that would mean emulating the C library's
 allocator, so the kit emits deterministic zeros; a byte-exact diff of a real document should mask
 the trailing `len % 4 ? 4 - len % 4 : 0` bytes of any page whose stream is not already 4-aligned.
+
+**Re-run 2026-10-16 with `tools/compare-real.sh` / `tools/verify-on-target.sh`:** the same result
+holds on two further real documents — the CV above and a 1-page bus ticket are each identical
+apart from 2 pad bytes — and the helper scripts keep every raster, so the same vendor output can
+be re-checked on another machine. (A third PDF on the host is password-encrypted, so `pdftopdf`
+refuses it before either filter runs.) Copies were checked at the same time: the vendor ignores
+`argv[4]` (copies `1`/`2`/`5` → byte-identical), so `COPIES=1` is faithful, not a gap.
 
 A second instance of the same defect was found later by the fuzzer, this time *inside* the
 decoded image: when a raster row is not a multiple of 4 bytes, the byte just past the row (the
