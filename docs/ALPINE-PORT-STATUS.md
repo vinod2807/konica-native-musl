@@ -103,6 +103,15 @@ adding the CMM table generator (`src/lutgen.c`), the musl build is still warning
 installed ICC profiles** (no `KONICA_LUT`), `make check-lutgen` passes (byte-identical table,
 sha256 `84a424f5…c6d6f`) and `make check-reader` is 27/27.
 
+**Re-verified once more on Alpine 3.24.2 / musl 1.2.5 (2026-10-16, commit `da1070d`):** a fresh
+`alpine-minirootfs` chroot with the vendor runtime data unpacked at the default path (sha256 match
+Ubuntu: `.hft 24486c45…`, `sRGB.icm 2b3aa164…`, `sGrayInv.icm 01fd6208…`). `make CC=cc` gives a
+musl-only binary (`ldd` shows no `libc.so.6`); `make check` exits 0 with **62 PASS / 0 FAIL**
+(reader 27/27, `check-lutgen` PASS with the same sha256 `84a424f5…c6d6f`, geometry 6/6, mediatype
+20/20, errors 6/6); `difftest.sh` over the 60-case corpus is **PASS 60 / FAIL 0**; and
+`tools/verify-on-target.sh` over 14 saved rasters is **PASS: 14 / FAIL: 0**. `tools/step3-alpine.sh`
+automates this whole check.
+
 **Conclusion:** the source is already musl-clean and produces **identical results** on glibc
 and musl (60/60 corpus, 27/27 reader). No source portability defect was found.
 
@@ -161,10 +170,10 @@ the corpus was not modified.
 | Default build | PASS | PASS |
 | Strict build (`-Wconversion -Wshadow`) | PASS (clean) | PASS (clean) |
 | `check-reader.sh` | PASS 27/27 | PASS 27/27 |
-| `check-lutgen` (33³ CMM table) | PASS — byte-identical to the vendor's, sha256 `84a424f5…c6d6f` | PASS |
-| `check-geometry.sh` | PASS 6/6 | not re-run in this pass |
-| `difftest.sh` (60 cases) | **PASS 60 / FAIL 0** | **PASS 60 / FAIL 0** |
-| Real documents vs the vendor filter | 2026-10-16 re-check: `WordCraft-test`, `7.pdf`, `problematic.pdf` byte-identical; CV pad-bytes-only; a real-photo page (A4 and Letter) byte-identical (§7.2) | not re-run in this pass |
+| `check-lutgen` (33³ CMM table) | PASS — byte-identical to the vendor's, sha256 `84a424f5…c6d6f` | PASS — same sha256 (2026-10-16) |
+| `check-geometry.sh` | PASS 6/6 | PASS 6/6 |
+| `difftest.sh` (60 cases) | **PASS 60 / FAIL 0** | **PASS 60 / FAIL 0** (re-run 2026-10-16) |
+| Real documents vs the vendor filter | 2026-10-16 re-check: `WordCraft-test`, `7.pdf`, `problematic.pdf` byte-identical; CV pad-bytes-only; a real-photo page (A4 and Letter) byte-identical (§7.2) | **PASS 14 / FAIL 0** via `tools/verify-on-target.sh` on the same rasters (2026-10-16) |
 | Printer / CUPS integration | NOT RUN | NOT RUN |
 
 ### 7.1 Corrections to earlier revisions of this file
@@ -250,7 +259,7 @@ rather than divergent; see `docs/REVERSE-ENGINEERING.md` §9.2.
    flat-tone approximation survives only behind the explicit `KONICA_FLAT_TONE=1` escape hatch.
 2. **NOT RUN:** CUPS integration on Alpine (Phase 5) and hardware testing (needs explicit user
    approval; nothing has been sent to a printer).
-3. **NOT RUN in this pass:** the Alpine/musl re-verification. The Alpine rootfs used in §3.2 was
-   removed from this machine, so the 60/60 and 27/27 numbers above remain the 2026-10-15
-   measurements; the source is unchanged in any way that affects portability (the new code uses
-   nothing beyond C11 + POSIX).
+3. **DONE (was NOT RUN):** the Alpine/musl re-verification. A fresh `alpine-minirootfs` chroot
+   (Alpine 3.24.2, musl 1.2.5) at commit `da1070d` reproduced every host result — musl-only
+   binary, `make check` 62 PASS / 0 FAIL, `difftest` 60/60, `check-lutgen` byte-identical, and
+   `verify-on-target` 14/14 on real rasters. See §3.2 and `tools/step3-alpine.sh`.

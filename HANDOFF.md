@@ -146,14 +146,16 @@ screen and ICC profiles, and skips cleanly without them. `make check` additional
 | `tests/difftest.sh` (LUT regenerated, no `KONICA_LUT`) | **60 / 60** | **60 / 60** |
 | `make check-lutgen` | PASS | PASS |
 | `make check-reader` | 27 / 27 | 27 / 27 |
-| `make check-geometry` | pass | not re-run (rootfs removed) |
-| `make check-mediatype` | 20 / 20 | not re-run |
-| `make check-errors` | 6 / 6 | not re-run |
+| `make check-geometry` | pass | pass |
+| `make check-mediatype` | 20 / 20 | 20 / 20 |
+| `make check-errors` | 6 / 6 | 6 / 6 |
+| `tools/verify-on-target.sh` (14 real rasters) | 14 / 14 | 14 / 14 |
 | `make check-determinism` (corpus, `MALLOC_PERTURB_`) | pass | not re-run |
 
-Everything vendor-free at once: `make check`. The Alpine column is the 2026-10-15 measurement;
-the Alpine rootfs has since been removed from the authoring machine, and the changes made since
-add no dependency beyond C11 + POSIX.
+Everything vendor-free at once: `make check`. The Alpine column is the **2026-10-16** measurement
+at commit `da1070d`: a fresh `alpine-minirootfs` chroot reproduced every host result (musl-only
+binary, `make check` 62 PASS / 0 FAIL, `difftest` 60/60, `check-lutgen` byte-identical,
+`verify-on-target` 14/14). `tools/step3-alpine.sh` automates the whole musl build + check + verify.
 
 ---
 
@@ -692,11 +694,11 @@ only in never-decoded pad bytes, §12.5), and the vendor's copies argument is ve
 * The repo lives at `/home/spot/Downloads/konica-native-musl`; the corpus at
   `/root/konica-corpus-full`.
 * The vendor tree is under `/usr/local/lib/konica/KonicaMinolta/245igdi/`.
-* A **musl test rootfs** was used at `/initrd/mnt/tmpfs/tmp/opencode/alpine/rootfs`
-  (Alpine 3.24.2) but **has since been removed**; recreate it from
-  `alpine-minirootfs-3.24.2-x86_64.tar.gz` as in `docs/ALPINE-PORT-STATUS.md` §2 before running
-  the musl column again. When it existed it held `/corpus`, the vendor profiles and the `.hft`.
-  Build and test with:
+* A **musl test rootfs** exists at `/initrd/mnt/tmpfs/tmp/opencode/alpine/rootfs`
+  (Alpine 3.24.2, recreated 2026-10-16) and holds `/corpus`, the vendor profiles and the `.hft`;
+  recreate it from `alpine-minirootfs-3.24.2-x86_64.tar.gz` as in
+  `docs/ALPINE-PORT-STATUS.md` §2 if it is gone. `tools/step3-alpine.sh` runs the whole musl
+  build + `make check` + `verify-on-target` in one shot. Build and test with:
 
   ```sh
   R=/initrd/mnt/tmpfs/tmp/opencode/alpine/rootfs

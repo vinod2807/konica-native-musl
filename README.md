@@ -63,6 +63,11 @@ byte-identical or differing only in the never-decoded BIE pad bytes (`prnscan.py
 non-default `OPTS` is folded into the output stem so two option sets on the same PDF (e.g. long-
 vs short-edge duplex) do not overwrite each other. Nothing is ever sent to a printer.
 
+On Alpine — or inside an Alpine chroot — `tools/step3-alpine.sh` runs the whole musl check in one
+shot: it installs the build deps, unpacks the vendor runtime data, clones and builds with
+`make CC=cc`, runs `make check`, and re-verifies the rasters kept by `compare-real.sh` with
+`verify-on-target.sh`.
+
 The differential test reproduces the vendor filter's captured output byte-for-byte:
 `PASS: 60   FAIL: 0` (verified on glibc and on Alpine/musl). It needs no captured
 table: the colour-management table is regenerated from the installed ICC profiles.
@@ -112,7 +117,8 @@ src/jbig.c        self-contained JBIG1 encoder
 src/raster.c      pure-libc CUPS raster reader (v1 / v2-RLE / v3)
 docs/             format spec and full reverse-engineering notes
 tools/            corpus capture, LUT dump recipe, raster generator, stream scanner,
-                  real-document comparison (compare-real.sh, verify-on-target.sh)
+                  real-document comparison (compare-real.sh, verify-on-target.sh),
+                  Alpine/musl build+verify (step3-alpine.sh)
 tests/            differential + reader cross-check harnesses
 ```
 
