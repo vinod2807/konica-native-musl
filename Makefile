@@ -80,7 +80,7 @@ check-asan: tests/libcups_dump
 	ASAN_OPTIONS=verify_asan_link_order=0 NATIVE=$(CURDIR)/konica-native-asan sh tests/check-reader.sh
 
 clean:
-	rm -f konica-native konica-native-asan tests/libcups_dump tools/lutgen-dump tools/biedec
+	rm -f konica-native konica-native-asan tests/libcups_dump tools/lutgen-dump tools/biedec tools/mkraster
 
 .PHONY: all check check-reader check-lutgen check-geometry check-mediatype \
         check-errors check-difftest check-determinism check-real check-fuzz \

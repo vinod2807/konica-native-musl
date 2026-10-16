@@ -9,24 +9,19 @@ _Last updated: 2026-10-16._
 ## 1. Repository / baseline facts
 
 * Project root: `/home/spot/Downloads/konica-native-musl`.
-* **Not a Git repository** (`git status` → `fatal: not a git repository`). No commit hash or
-  branch exists; no branch/backup could be created. Changes are tracked here by hand.
-* Source tree (tracked source, `find . -maxdepth 3 -type f`):
+* **Git repository**, published PUBLIC at
+  <https://github.com/vinod2807/konica-native-musl>, branch `main`. This file describes the
+  state at commit `983ec30` (2026-10-16).
+* Source tree: `src/{main,raster,encode,jbig,halftone,acmm,lutgen}.{c,h}`, `tests/`, `tools/`,
+  `docs/`, plus `Makefile`, `README.md`, `HANDOFF.md`.
 
-  ```
-  Makefile  README-RE.md
-  src/{main,raster,encode,jbig,halftone,acmm,lutgen}.c  src/{raster,encode,jbig,halftone,acmm,lutgen}.h
-  tests/{difftest.sh,check-reader.sh,check-lutgen.sh,libcups_dump.c}
-  tools/{capture-corpus.sh,dump-lut.gdb,lutgen-dump.c,mkraster.c,prnscan.py}
-  docs/{LUT-GENERATOR.md,DEVICE-STREAM.md,REVERSE-ENGINEERING.md,ALPINE.md,ALPINE-PORT-STATUS.md}
-  ```
+  *(Originally the project was not a git repository and was tracked by hand; it was initialised
+  and published afterwards. The old hand-tracked file list is superseded by the `Layout`
+  section of `README.md`.)*
 
-  (The tree is now a Git repository; this section is the original hand-tracked
-  snapshot and is kept as the record of that session.)
-
-* Build artifact `./konica-native` is produced by `make`; `tools/mkraster` and
-  `tests/libcups_dump` are produced by `make check-reader`. **These are build artifacts, not
-  tracked sources** — see the stale-artifact note in §5.
+* Build artifact `./konica-native` is produced by `make`; `tools/mkraster`, `tests/libcups_dump`,
+  `tools/lutgen-dump` and `tools/biedec` are produced by the test targets. **These are build
+  artifacts, not tracked sources** — see the stale-artifact note in §5.
 
 ## 2. Build environments
 
@@ -139,8 +134,9 @@ Earlier tidy-ups landed in the same session (non-portability, no behaviour chang
 copied into the Alpine chroot, the host's **glibc** `tools/mkraster` came with it;
 `check-reader.sh` saw it as executable and ran it under musl, where it failed to load →
 every case reported `SKIP (mkraster)`. Removing `tools/mkraster tests/libcups_dump` and
-rebuilding natively fixed it. `make clean` currently removes `konica-native` and
-`tests/libcups_dump` but **not `tools/mkraster`** — flagged for a future Makefile tidy.
+rebuilding natively fixed it. `make clean` now removes **every** build artifact
+(`konica-native`, `konica-native-asan`, `tests/libcups_dump`, `tools/lutgen-dump`,
+`tools/biedec`, `tools/mkraster`), so the hazard is closed.
 
 ## 6. Asset inventory (what is available on this machine)
 
@@ -152,7 +148,7 @@ rebuilding natively fixed it. `make clean` currently removes `konica-native` and
 | Full-bleed PPD | `/var/lib/legacy-printer-app/ppd/KonicaMinolta-206-fullbleed.ppd` | present |
 | Corpus (60 cases) | `/root/konica-corpus-full/corpus/*.{ras,prn}` + `manifest.tsv` | present |
 | Corpus integrity | 120/120 sha256 match `manifest.tsv` | **verified** |
-| RE scratch tooling | `/tmp/g*.cmds`, `/tmp/probe*.py`, `/tmp/gen_*.py`, `/tmp/traw*.bin` | present |
+| RE scratch tooling | `/tmp/g*.cmds`, `/tmp/probe*.py`, `/tmp/gen_*.py`, `/tmp/traw*.bin` | gone (ephemeral `/tmp`; the durable recipes live in `tools/` and `docs/`) |
 | Disassembly tooling | `gdb`, `strace`, `objdump`, `nm`, `python3` | present |
 
 All corpus `.ras`/`.prn` hashes were re-verified against `manifest.tsv` before any testing;
@@ -168,7 +164,7 @@ the corpus was not modified.
 | `check-lutgen` (33³ CMM table) | PASS — byte-identical to the vendor's, sha256 `84a424f5…c6d6f` | PASS |
 | `check-geometry.sh` | PASS 6/6 | not re-run in this pass |
 | `difftest.sh` (60 cases) | **PASS 60 / FAIL 0** | **PASS 60 / FAIL 0** |
-| Real documents vs the vendor filter | 2/3 byte-identical; the third differs only in 2 pad bytes the device never decodes (§7.2) | not re-run in this pass |
+| Real documents vs the vendor filter | 2026-10-16 re-check: `WordCraft-test`, `7.pdf`, `problematic.pdf` byte-identical; CV pad-bytes-only; a real-photo page (A4 and Letter) byte-identical (§7.2) | not re-run in this pass |
 | Printer / CUPS integration | NOT RUN | NOT RUN |
 
 ### 7.1 Corrections to earlier revisions of this file
@@ -211,6 +207,8 @@ Results after the fixes:
 | `WordCraft-test.pdf` | 1 | byte-identical (2439 B) |
 | `7.pdf` | 4 | byte-identical (456864 B) |
 | `ACF0E705EDF100D6FF0E523618376FA1-Tejaswini_CV.pdf` | 2 | identical except the final 2 bytes of page 2 |
+| `problematic.pdf` | 3 | byte-identical (721699 B) — re-checked 2026-10-16 |
+| a real-photo page (A4 / Letter) | 1 / 1 | byte-identical (430428 / 452649 B) — re-checked 2026-10-16 |
 
 The single remaining difference is a **vendor defect that cannot be reproduced portably**: the
 4-byte padding at the end of a BIE follows the last SDNORM marker and is never decoded, and the
@@ -223,12 +221,15 @@ though stale bytes were available. Reproducing that would mean emulating the C l
 allocator, so the kit emits deterministic zeros; a byte-exact diff of a real document should mask
 the trailing `len % 4 ? 4 - len % 4 : 0` bytes of any page whose stream is not already 4-aligned.
 
-**Re-run 2026-10-16 with `tools/compare-real.sh` / `tools/verify-on-target.sh`:** the same result
-holds on two further real documents — the CV above and a 1-page bus ticket are each identical
-apart from 2 pad bytes — and the helper scripts keep every raster, so the same vendor output can
-be re-checked on another machine. (A third PDF on the host is password-encrypted, so `pdftopdf`
-refuses it before either filter runs.) Copies were checked at the same time: the vendor ignores
-`argv[4]` (copies `1`/`2`/`5` → byte-identical), so `COPIES=1` is faithful, not a gap.
+**Re-run 2026-10-16 with `tools/compare-real.sh` / `tools/verify-on-target.sh`:** the two
+byte-identical documents above still reproduce exactly (`WordCraft-test` 2439 B, `7.pdf`
+456864 B), a third real 3-page document (`problematic.pdf`, 721699 B) is byte-identical, and the
+CV is pad-bytes-only as before — the helper scripts keep every raster, so the same vendor output
+can be re-checked on another machine. Two further documents are pad-bytes-only (a 1-page bus
+ticket; the CV), and a page built from a real photograph is byte-identical on both A4 and Letter.
+(A fourth PDF on the host is password-encrypted, so `pdftopdf` refuses it before either filter
+runs.) Copies were checked at the same time: the vendor ignores `argv[4]` (copies `1`/`2`/`5` →
+byte-identical), so `COPIES=1` is faithful, not a gap.
 
 A second instance of the same defect was found later by the fuzzer, this time *inside* the
 decoded image: when a raster row is not a multiple of 4 bytes, the byte just past the row (the

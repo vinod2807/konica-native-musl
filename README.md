@@ -9,12 +9,13 @@ The whole pipeline — page framing, page geometry, colour conversion, halftonin
 entropy coding — was reconstructed from disassembly and runtime captures, and is
 **byte-exact on all 60 cases** of the captured differential corpus.
 
-It is also byte-exact on real `pdftoraster` output: three real PDFs (1, 4 and 2 pages) were
-run through the vendor filter and through this kit and compared byte for byte. Two are
-identical; the third differs in exactly 2 bytes, which are the 4-byte alignment padding at
-the end of a bitmap — bytes the device never decodes, and which the vendor fills with
-uninitialised heap memory (see `docs/ALPINE-PORT-STATUS.md` §7.2). No printer was involved
-in any of this: both filters wrote to a file.
+It is also byte-exact on real `pdftoraster` output: real PDFs — text, a photograph, and
+multi-page documents, on A4 and Letter — were run through the vendor filter and through this kit
+and compared byte for byte. They are byte-identical, except for two documents that differ in
+exactly 2 bytes each: the 4-byte alignment padding at the end of a bitmap, bytes the device never
+decodes and which the vendor fills with uninitialised heap memory (see
+`docs/ALPINE-PORT-STATUS.md` §7.2). No printer was involved in any of this: both filters wrote to
+a file.
 
 * Pure C11, libc only — no third-party libraries, builds on glibc and musl/Alpine.
 * Self-contained: no GPL/third-party encoder is vendored (the JBIG1 QM coder is
